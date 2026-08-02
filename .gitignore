@@ -1,0 +1,19 @@
+# Variables de entorno
+.env
+.env.*
+!.env.example
+
+# Datos y modelos
+data/indexes/
+data/raw/
+data/processed/
+logs/
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
