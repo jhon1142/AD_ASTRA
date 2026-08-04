@@ -9,15 +9,15 @@ from pathlib import Path
 from typing import Union
 
 from core.document import Document
-from loaders.base_loader import BaseLoader
-from loaders.csv_loader import CSVLoader
-from loaders.html_loader import HTMLLoader
-from loaders.json_loader import JSONLoader
-from loaders.markdown_loader import MarkdownLoader
-from loaders.pdf_loader import PDFLoader
-from loaders.remote_loader import RemoteLoader
-from loaders.txt_loader import TXTLoader
-from loaders.xlsx_loader import XLSXLoader
+from data.loaders.base_loader import BaseLoader
+from data.loaders.csv_loader import CSVLoader
+from data.loaders.html_loader import HTMLLoader
+from data.loaders.json_loader import JSONLoader
+from data.loaders.markdown_loader import MarkdownLoader
+from data.loaders.pdf_loader import PDFLoader
+from data.loaders.remote_loader import RemoteLoader
+from data.loaders.txt_loader import TXTLoader
+from data.loaders.xlsx_loader import XLSXLoader
 from preprocessing.cleaner import TextCleaner
 
 

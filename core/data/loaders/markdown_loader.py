@@ -7,7 +7,7 @@ from typing import Union
 
 from config.settings import DEFAULT_ENCODING
 from core.document import Document
-from loaders.base_loader import BaseLoader
+from data.loaders.base_loader import BaseLoader
 
 
 class MarkdownLoader(BaseLoader):

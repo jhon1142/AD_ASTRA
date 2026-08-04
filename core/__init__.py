@@ -1,5 +1,15 @@
-# core/ ahora es un alias de models/ para compatibilidad con código existente.
-# Importar siempre desde models/ directamente.
-from models.document import Document
+from core.document import Document
+from core.chunk import Chunk
+from core.metadata import ChunkMetadata
+from core.query import Query
+from core.result import FragmentResult, DocumentResult, QueryResult
 
-__all__ = ["Document"]
+__all__ = [
+    "Document",
+    "Chunk",
+    "ChunkMetadata",
+    "Query",
+    "FragmentResult",
+    "DocumentResult",
+    "QueryResult",
+]

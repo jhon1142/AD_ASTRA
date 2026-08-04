@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Union
 
 from core.document import Document
-from loaders.base_loader import BaseLoader
+from data.loaders.base_loader import BaseLoader
 
 
 class PDFLoader(BaseLoader):

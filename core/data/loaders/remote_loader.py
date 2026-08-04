@@ -7,7 +7,7 @@ from pathlib import Path
 
 from config.settings import REMOTE_TIMEOUT
 from core.document import Document
-from loaders.base_loader import BaseLoader
+from data.loaders.base_loader import BaseLoader
 
 
 class RemoteLoader(BaseLoader):
