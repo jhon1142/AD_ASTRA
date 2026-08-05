@@ -1,106 +1,122 @@
 """
-Definición de modelos de embedding disponibles en AD_ASTRA.
+Catálogo de modelos de embedding para AD_ASTRA — CODEFEST 2026.
 
-Centraliza los parámetros de cada modelo (nombre, dimensión, proveedor)
-para que el resto del sistema no tenga constantes hardcodeadas.
+Solo modelos encoder de HuggingFace bajo licencias libres (Apache 2.0 / MIT).
+Los modelos generativos (GPT, LLaMA, etc.) están explícitamente excluidos
+según la Sección 8.3 del spec.
+
+Criterios de selección (Sección 4.3):
+- Soporte multilingüe (es, en, pt)
+- Buen rendimiento en MTEB / BEIR
+- Licencia libre
+- Límite de tokens compatible con la estrategia de chunking
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-
-
-class EmbeddingProvider(str, Enum):
-    OPENAI = "openai"
-    SENTENCE_TRANSFORMERS = "sentence_transformers"
-    COHERE = "cohere"
 
 
 @dataclass(frozen=True)
 class EmbeddingModel:
     """
-    Descripción de un modelo de embedding.
+    Descriptor de un modelo de embedding.
 
     Attributes:
-        name:       Identificador del modelo tal como lo espera el proveedor.
-        provider:   Proveedor del modelo.
-        dimensions: Dimensión del vector de salida.
-        max_tokens: Tokens máximos de entrada soportados por el modelo.
+        name:           Identificador en HuggingFace Hub.
+        dimensions:     Dimensión del vector de salida.
+        max_tokens:     Tokens máximos de entrada.
+        query_prefix:   Prefijo para textos de consulta (algunos modelos lo requieren).
+        doc_prefix:     Prefijo para textos de documento.
+        normalize:      Si el modelo requiere normalización para similitud coseno.
+        license:        Licencia del modelo.
+        notes:          Notas sobre el modelo.
     """
-    name: str
-    provider: EmbeddingProvider
-    dimensions: int
-    max_tokens: int
+    name:         str
+    dimensions:   int
+    max_tokens:   int
+    query_prefix: str = ""
+    doc_prefix:   str = ""
+    normalize:    bool = True
+    license:      str = "Apache 2.0"
+    notes:        str = ""
 
 
-# ------------------------------------------------------------------
-# Catálogo de modelos disponibles
-# ------------------------------------------------------------------
+# ── Catálogo de modelos disponibles ──────────────────────────────────────────
+# Solo SentenceTransformers / HuggingFace. Sin OpenAI ni Cohere.
 
 MODELS: dict[str, EmbeddingModel] = {
-    # OpenAI
-    "text-embedding-ada-002": EmbeddingModel(
-        name="text-embedding-ada-002",
-        provider=EmbeddingProvider.OPENAI,
-        dimensions=1536,
-        max_tokens=8191,
+
+    # ── Recomendado para CODEFEST ─────────────────────────────────────────────
+    "BAAI/bge-m3": EmbeddingModel(
+        name         = "BAAI/bge-m3",
+        dimensions   = 1024,
+        max_tokens   = 8192,
+        query_prefix = "",   # bge-m3 no requiere prefijo
+        doc_prefix   = "",
+        normalize    = True,
+        license      = "MIT",
+        notes        = "Multilingüe (100+ idiomas). Estado del arte en MTEB. "
+                       "Soporta es/en/pt nativamente.",
     ),
-    "text-embedding-3-small": EmbeddingModel(
-        name="text-embedding-3-small",
-        provider=EmbeddingProvider.OPENAI,
-        dimensions=1536,
-        max_tokens=8191,
+
+    # ── Alternativa multilingüe ───────────────────────────────────────────────
+    "intfloat/multilingual-e5-large": EmbeddingModel(
+        name         = "intfloat/multilingual-e5-large",
+        dimensions   = 1024,
+        max_tokens   = 512,
+        query_prefix = "query: ",
+        doc_prefix   = "passage: ",
+        normalize    = True,
+        license      = "MIT",
+        notes        = "Requiere prefijos query:/passage:. Buen rendimiento multilingüe.",
     ),
-    "text-embedding-3-large": EmbeddingModel(
-        name="text-embedding-3-large",
-        provider=EmbeddingProvider.OPENAI,
-        dimensions=3072,
-        max_tokens=8191,
+
+    "intfloat/multilingual-e5-base": EmbeddingModel(
+        name         = "intfloat/multilingual-e5-base",
+        dimensions   = 768,
+        max_tokens   = 512,
+        query_prefix = "query: ",
+        doc_prefix   = "passage: ",
+        normalize    = True,
+        license      = "MIT",
+        notes        = "Versión más ligera de multilingual-e5-large.",
     ),
-    # Sentence Transformers (locales)
-    "all-MiniLM-L6-v2": EmbeddingModel(
-        name="all-MiniLM-L6-v2",
-        provider=EmbeddingProvider.SENTENCE_TRANSFORMERS,
-        dimensions=384,
-        max_tokens=256,
+
+    # ── Modelos livianos para prototipado rápido ──────────────────────────────
+    "paraphrase-multilingual-mpnet-base-v2": EmbeddingModel(
+        name         = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+        dimensions   = 768,
+        max_tokens   = 128,
+        normalize    = True,
+        license      = "Apache 2.0",
+        notes        = "Rápido. Límite de 128 tokens — chunks deben ser cortos.",
     ),
+
     "paraphrase-multilingual-MiniLM-L12-v2": EmbeddingModel(
-        name="paraphrase-multilingual-MiniLM-L12-v2",
-        provider=EmbeddingProvider.SENTENCE_TRANSFORMERS,
-        dimensions=384,
-        max_tokens=128,
-    ),
-    "multi-qa-mpnet-base-dot-v1": EmbeddingModel(
-        name="multi-qa-mpnet-base-dot-v1",
-        provider=EmbeddingProvider.SENTENCE_TRANSFORMERS,
-        dimensions=768,
-        max_tokens=512,
-    ),
-    # Cohere
-    "embed-multilingual-v3.0": EmbeddingModel(
-        name="embed-multilingual-v3.0",
-        provider=EmbeddingProvider.COHERE,
-        dimensions=1024,
-        max_tokens=512,
+        name         = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        dimensions   = 384,
+        max_tokens   = 128,
+        normalize    = True,
+        license      = "Apache 2.0",
+        notes        = "Muy rápido. Menor calidad que bge-m3 pero útil para pruebas.",
     ),
 }
 
 
 def get_embedding_model(name: str) -> EmbeddingModel:
     """
-    Devuelve el EmbeddingModel correspondiente al nombre dado.
+    Devuelve el EmbeddingModel para el nombre dado.
 
-    Args:
-        name: Clave del modelo en el catálogo MODELS.
-
-    Returns:
-        EmbeddingModel con los parámetros del modelo.
+    Acepta tanto la clave corta ('BAAI/bge-m3') como el nombre completo.
 
     Raises:
-        ValueError: Si el nombre no está en el catálogo.
+        ValueError: Si el modelo no está en el catálogo.
     """
     model = MODELS.get(name)
     if model is None:
-        available = ", ".join(MODELS.keys())
-        raise ValueError(f"Modelo '{name}' no encontrado. Disponibles: {available}")
+        available = "\n  ".join(MODELS.keys())
+        raise ValueError(
+            f"Modelo '{name}' no encontrado en el catálogo.\n"
+            f"Disponibles:\n  {available}"
+        )
     return model

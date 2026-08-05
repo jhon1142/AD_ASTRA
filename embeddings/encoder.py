@@ -1,142 +1,197 @@
 """
-Encoder unificado de embeddings para AD_ASTRA.
+Encoder de embeddings para AD_ASTRA — CODEFEST 2026.
 
-Soporta tres proveedores: OpenAI, Sentence Transformers y Cohere.
-La interfaz es la misma independientemente del proveedor.
+Usa exclusivamente modelos encoder de HuggingFace a través de
+sentence-transformers. Los modelos generativos (GPT, LLaMA, etc.)
+están prohibidos por el spec (Sección 8.3).
+
+Funcionalidades:
+- Normalización L2 automática (para similitud coseno con IndexFlatIP)
+- Prefijos query/documento según el modelo (multilingual-e5)
+- Batching con barra de progreso opcional
+- Encode de textos, Documents y Chunks
 """
 from __future__ import annotations
 
 import numpy as np
 
-from config.settings import EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE
+from config.settings import (
+    EMBEDDING_MODEL,
+    EMBEDDING_BATCH_SIZE,
+    EMBEDDING_NORMALIZE,
+)
 from core.document import Document
-from embeddings.models import EmbeddingModel, EmbeddingProvider, get_embedding_model
+from embeddings.models import EmbeddingModel, get_embedding_model
 
 
 class Encoder:
     """
-    Genera embeddings para textos y documentos.
+    Genera embeddings usando un modelo SentenceTransformer de HuggingFace.
 
     Args:
-        model_name:  Nombre del modelo (debe estar en embeddings.models.MODELS).
-        batch_size:  Número de textos enviados por llamada a la API.
-        api_key:     API key del proveedor. Si es None, se lee de las
-                     variables de entorno (OPENAI_API_KEY, COHERE_API_KEY).
+        model_name:  Nombre del modelo en el catálogo (e.g. 'BAAI/bge-m3').
+        batch_size:  Textos por lote durante la inferencia.
+        normalize:   Si True, normaliza vectores a norma unitaria (L2).
+                     Requerido para similitud coseno con IndexFlatIP.
+        device:      'cpu', 'cuda' o 'mps'. None = detección automática.
+        show_progress: Muestra barra de progreso en encode().
     """
 
     def __init__(
         self,
-        model_name: str = EMBEDDING_MODEL,
-        batch_size: int = EMBEDDING_BATCH_SIZE,
-        api_key: str | None = None,
+        model_name:    str  = EMBEDDING_MODEL,
+        batch_size:    int  = EMBEDDING_BATCH_SIZE,
+        normalize:     bool = EMBEDDING_NORMALIZE,
+        device:        str | None = None,
+        show_progress: bool = False,
     ) -> None:
-        self.model: EmbeddingModel = get_embedding_model(model_name)
-        self.batch_size = batch_size
-        self.api_key = api_key
-        self._client = self._build_client()
+        self.model_info:    EmbeddingModel = get_embedding_model(model_name)
+        self.batch_size:    int  = batch_size
+        self.normalize:     bool = normalize
+        self.show_progress: bool = show_progress
+        self._model = self._load_model(device)
 
     # ------------------------------------------------------------------
-    # Inicialización del cliente según proveedor
+    # Carga del modelo
     # ------------------------------------------------------------------
 
-    def _build_client(self):
-        provider = self.model.provider
+    def _load_model(self, device: str | None):
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise ImportError(
+                "Instala sentence-transformers: pip install sentence-transformers"
+            ) from exc
 
-        if provider == EmbeddingProvider.OPENAI:
-            try:
-                from openai import OpenAI
-            except ImportError as exc:
-                raise ImportError("Instala 'openai': pip install openai") from exc
-            return OpenAI(api_key=self.api_key) if self.api_key else OpenAI()
-
-        if provider == EmbeddingProvider.SENTENCE_TRANSFORMERS:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError as exc:
-                raise ImportError(
-                    "Instala 'sentence-transformers': pip install sentence-transformers"
-                ) from exc
-            return SentenceTransformer(self.model.name)
-
-        if provider == EmbeddingProvider.COHERE:
-            try:
-                import cohere
-            except ImportError as exc:
-                raise ImportError("Instala 'cohere': pip install cohere") from exc
-            return cohere.Client(self.api_key) if self.api_key else cohere.Client()
-
-        raise ValueError(f"Proveedor no soportado: {provider}")
+        print(f"[Encoder] Cargando modelo: {self.model_info.name}")
+        model = SentenceTransformer(self.model_info.name, device=device)
+        print(f"[Encoder] Modelo listo — dimensiones: {self.dimensions}")
+        return model
 
     # ------------------------------------------------------------------
-    # Métodos de embedding
+    # Prefijos según modelo (multilingual-e5 los requiere)
     # ------------------------------------------------------------------
 
-    def _embed_openai(self, texts: list[str]) -> list[list[float]]:
-        response = self._client.embeddings.create(
-            input=texts,
-            model=self.model.name,
-        )
-        return [item.embedding for item in response.data]
+    def _apply_query_prefix(self, text: str) -> str:
+        prefix = self.model_info.query_prefix
+        return f"{prefix}{text}" if prefix else text
 
-    def _embed_sentence_transformers(self, texts: list[str]) -> list[list[float]]:
-        vectors = self._client.encode(texts, batch_size=self.batch_size, show_progress_bar=False)
-        return vectors.tolist()
-
-    def _embed_cohere(self, texts: list[str]) -> list[list[float]]:
-        response = self._client.embed(
-            texts=texts,
-            model=self.model.name,
-            input_type="search_document",
-        )
-        return response.embeddings
-
-    def _embed_batch(self, texts: list[str]) -> list[list[float]]:
-        provider = self.model.provider
-        if provider == EmbeddingProvider.OPENAI:
-            return self._embed_openai(texts)
-        if provider == EmbeddingProvider.SENTENCE_TRANSFORMERS:
-            return self._embed_sentence_transformers(texts)
-        if provider == EmbeddingProvider.COHERE:
-            return self._embed_cohere(texts)
-        raise ValueError(f"Proveedor no soportado: {provider}")
+    def _apply_doc_prefix(self, text: str) -> str:
+        prefix = self.model_info.doc_prefix
+        return f"{prefix}{text}" if prefix else text
 
     # ------------------------------------------------------------------
-    # API pública
+    # Normalización L2
     # ------------------------------------------------------------------
 
-    def encode(self, texts: list[str]) -> np.ndarray:
+    @staticmethod
+    def _normalize(vectors: np.ndarray) -> np.ndarray:
+        """Normaliza cada vector a norma unitaria (L2)."""
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)   # evitar división por cero
+        return vectors / norms
+
+    # ------------------------------------------------------------------
+    # API pública — textos
+    # ------------------------------------------------------------------
+
+    def encode(self, texts: list[str], is_query: bool = False) -> np.ndarray:
         """
         Genera embeddings para una lista de textos.
 
         Args:
-            texts: Lista de cadenas a vectorizar.
+            texts:    Lista de cadenas a vectorizar.
+            is_query: Si True, aplica el prefijo de consulta del modelo.
+                      Si False, aplica el prefijo de documento.
 
         Returns:
-            Array numpy de shape (len(texts), dimensions).
+            Array numpy float32 de shape (len(texts), dimensions).
+            Si normalize=True, cada vector tiene norma unitaria.
         """
-        all_embeddings: list[list[float]] = []
+        if not texts:
+            return np.empty((0, self.dimensions), dtype=np.float32)
 
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
-            all_embeddings.extend(self._embed_batch(batch))
+        # Aplicar prefijo según rol
+        if is_query:
+            processed = [self._apply_query_prefix(t) for t in texts]
+        else:
+            processed = [self._apply_doc_prefix(t) for t in texts]
 
-        return np.array(all_embeddings, dtype=np.float32)
+        vectors = self._model.encode(
+            processed,
+            batch_size        = self.batch_size,
+            show_progress_bar = self.show_progress,
+            convert_to_numpy  = True,
+        ).astype(np.float32)
+
+        if self.normalize:
+            vectors = self._normalize(vectors)
+
+        return vectors
+
+    def encode_query(self, query: str) -> np.ndarray:
+        """
+        Vectoriza una consulta de usuario.
+
+        Aplica el prefijo de query del modelo. Retorna vector 1D
+        de shape (dimensions,) listo para buscar en FAISS.
+
+        Ref: Sección 8.1 del spec — mismo encoder para indexar y recuperar.
+        """
+        return self.encode([query], is_query=True)[0]
+
+    # ------------------------------------------------------------------
+    # API pública — Documents
+    # ------------------------------------------------------------------
 
     def encode_document(self, document: Document) -> np.ndarray:
-        """Genera el embedding del contenido de un Document."""
-        return self.encode([document.content])[0]
+        """Vectoriza el contenido de un Document. Retorna vector 1D."""
+        return self.encode([document.content], is_query=False)[0]
 
     def encode_documents(self, documents: list[Document]) -> np.ndarray:
         """
-        Genera embeddings para una lista de Documents.
+        Vectoriza una lista de Documents.
 
         Returns:
             Array numpy de shape (len(documents), dimensions).
         """
         texts = [doc.content for doc in documents]
-        return self.encode(texts)
+        return self.encode(texts, is_query=False)
+
+    def encode_chunks(self, chunks) -> np.ndarray:
+        """
+        Vectoriza una lista de Chunk (core.chunk.Chunk).
+
+        Usa el campo 'texto' del chunk (texto original sin modificar).
+
+        Returns:
+            Array numpy de shape (len(chunks), dimensions).
+        """
+        texts = [c.texto for c in chunks]
+        return self.encode(texts, is_query=False)
+
+    # ------------------------------------------------------------------
+    # Propiedades
+    # ------------------------------------------------------------------
 
     @property
     def dimensions(self) -> int:
-        """Dimensión del vector de salida del modelo."""
-        return self.model.dimensions
+        """Dimensión del vector de salida."""
+        return self.model_info.dimensions
+
+    @property
+    def max_tokens(self) -> int:
+        """Tokens máximos de entrada del modelo."""
+        return self.model_info.max_tokens
+
+    @property
+    def model_name(self) -> str:
+        """Nombre del modelo."""
+        return self.model_info.name
+
+    def __repr__(self) -> str:
+        return (
+            f"Encoder(model={self.model_name!r}, "
+            f"dims={self.dimensions}, "
+            f"normalize={self.normalize})"
+        )
