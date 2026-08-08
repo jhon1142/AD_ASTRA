@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
+from core.chunk import Chunk
 
 from config.settings import VECTORSTORE_PATH
 from core.document import Document
@@ -35,20 +36,19 @@ class MetadataStore:
     # Gestión de registros
     # ------------------------------------------------------------------
 
-    def add(self, documents: list[Document]) -> None:
+    def add(self, chunks: list[Chunk]) -> None:
         """
-        Agrega documentos al store en el mismo orden en que sus vectores
-        fueron agregados a FAISSManager.
+        Agrega chunks al store en el mismo orden en que sus vectores
+    fueron agregados a FAISSManager.
 
-        Args:
-            documents: Lista de Documents cuyas posiciones coinciden con
-                       los vectores recién agregados al índice.
+    Args:
+        chunks: Lista de Chunk cuyas posiciones coinciden con
+                los vectores recién agregados al índice.
         """
-        for doc in documents:
-            record: dict = {"metadata": doc.metadata, "doc_id": doc.doc_id}
-            if self.store_documents:
-                record["content"] = doc.content
-            self._records.append(record)
+        for chunk in chunks:
+            self._records.append(
+                chunk.to_metadata_record()
+            )
 
     def get(self, index: int) -> dict:
         """
@@ -84,9 +84,12 @@ class MetadataStore:
             record = self.get(idx)
             documents.append(
                 Document(
-                    content=record.get("content", ""),
-                    metadata=record.get("metadata", {}),
-                    doc_id=record.get("doc_id", ""),
+                    doc_id=record["doc_id"],
+                    fuente=record["fuente"],
+                    formato=record["formato"],
+                    fenomeno=record["fenomeno"],
+                    content=record["texto"],
+                    metadata={},
                 )
             )
         return documents
@@ -114,15 +117,17 @@ class MetadataStore:
         if format not in ("json", "pickle"):
             raise ValueError("format debe ser 'json' o 'pickle'")
 
-        ext = "json" if format == "json" else "pkl"
+        ext = "jsonl" if format == "json" else "pkl"
         save_path = Path(path) if path else Path(VECTORSTORE_PATH) / f"metadata.{ext}"
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
         if format == "json":
-            save_path.write_text(
-                json.dumps(self._records, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with save_path.open("w", encoding="utf-8") as f:
+                for record in self._records:
+                    f.write(
+                        json.dumps(record, ensure_ascii=False)
+                    )
+                    f.write("\n")
         else:
             with save_path.open("wb") as f:
                 pickle.dump(self._records, f)
@@ -144,7 +149,7 @@ class MetadataStore:
         path = Path(path)
         instance = cls(store_documents=store_documents)
 
-        if path.suffix == ".json":
+        if path.suffix in (".json", ".jsonl"):
             instance._records = json.loads(path.read_text(encoding="utf-8"))
         elif path.suffix in (".pkl", ".pickle"):
             with path.open("rb") as f:

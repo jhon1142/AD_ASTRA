@@ -17,7 +17,7 @@ from config.settings import (
     VECTORSTORE_PATH,
 )
 from chunking.splitter import RecursiveCharacterSplitter
-from core.document import Document
+from core.chunk import Chunk
 from embeddings.encoder import Encoder
 from pipeline.load_documents import load_and_clean
 from preprocessing.cleaner import TextCleaner
@@ -79,13 +79,13 @@ def build_index(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
-    chunks: list[Document] = splitter.split_documents(documents)
+    chunks: list[Chunk] = splitter.split_documents(documents)
     _log(verbose, f"      {len(chunks)} chunk(s) generados.")
 
     # ── 3. Embeddings ────────────────────────────────────────────────────
     _log(verbose, f"[3/4] Generando embeddings con '{embedding_model}'...")
     encoder = Encoder(model_name=embedding_model, batch_size=batch_size, api_key=api_key)
-    vectors = encoder.encode_documents(chunks)
+    vectors = encoder.encode_chunks(chunks)
     _log(verbose, f"      Vectores shape: {vectors.shape}")
 
     # ── 4. Indexación ────────────────────────────────────────────────────
@@ -104,8 +104,8 @@ def build_index(
     base = Path(save_path) if save_path else Path(VECTORSTORE_PATH)
     base.mkdir(parents=True, exist_ok=True)
 
-    index_file = faiss_mgr.save(base / "faiss.index")
-    meta_file  = meta_store.save(base / "metadata.json")
+    index_file = faiss_mgr.save(base / "index.faiss")
+    meta_file = meta_store.save(base / "metadata.jsonl")
 
     elapsed = time.perf_counter() - t_start
     _log(verbose, f"\n✓ Índice construido en {elapsed:.1f}s")
