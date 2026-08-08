@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from config.settings import DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
 from core.document import Document
+from core.chunk import Chunk
 
 
 class RecursiveCharacterSplitter:
@@ -101,28 +102,33 @@ class RecursiveCharacterSplitter:
         """Divide una cadena y devuelve lista de chunks."""
         return self._split_text(text, self.separators)
 
-    def split_document(self, document: Document) -> list[Document]:
+    def split_document(self, document: Document) -> list[Chunk]:
         """
-        Divide un Document y devuelve una lista de Documents hijos.
+        Divide un Document y devuelve una lista de Chunks.
         Los metadatos del documento original se heredan.
         """
         chunks = self.split_text(document.content)
         return [
-            Document(
-                content=chunk,
+            Chunk(
+                chunk_id=f"{document.doc_id}-chunk-{i:04d}",
+                doc_id=document.doc_id,
+                fuente=document.fuente,
+                formato=document.formato,
+                fenomeno=document.fenomeno,
+                posicion=i,
+                num_tokens=len(chunk.split()),
+                texto=chunk,
                 metadata={
                     **document.metadata,
-                    "chunk_index": i,
                     "total_chunks": len(chunks),
                 },
-                doc_id=f"{document.doc_id}_chunk{i}" if document.doc_id else "",
             )
             for i, chunk in enumerate(chunks)
         ]
 
-    def split_documents(self, documents: list[Document]) -> list[Document]:
+    def split_documents(self, documents: list[Document]) -> list[Chunk]:
         """Aplica split_document() a una lista de documentos."""
-        result: list[Document] = []
+        result: list[Chunk] = []
         for doc in documents:
             result.extend(self.split_document(doc))
         return result
