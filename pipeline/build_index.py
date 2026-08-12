@@ -6,6 +6,7 @@ Orquesta: load → clean → chunk → embed → store (FAISS + MetadataStore).
 from __future__ import annotations
 
 import time
+import torch
 from pathlib import Path
 from typing import Union
 
@@ -84,8 +85,8 @@ def build_index(
 
     # ── 3. Embeddings ────────────────────────────────────────────────────
     _log(verbose, f"[3/4] Generando embeddings con '{embedding_model}'...")
-    encoder = Encoder(model_name=embedding_model, batch_size=batch_size, api_key=api_key)
-    vectors = encoder.encode_documents(chunks)
+    encoder = Encoder(model_name=embedding_model, batch_size=batch_size, device="cuda",show_progress=True,)
+    vectors = encoder.encode_chunks(chunks)
     _log(verbose, f"      Vectores shape: {vectors.shape}")
 
     # ── 4. Indexación ────────────────────────────────────────────────────
