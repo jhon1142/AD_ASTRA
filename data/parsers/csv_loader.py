@@ -13,7 +13,11 @@ from typing import Union
 
 from config.settings import DEFAULT_ENCODING
 from core.document import Document
-from data.parsers.base_loader import BaseLoader, infer_fenomeno, make_doc_id
+from data.parsers.base_loader import (
+    BaseLoader,
+    infer_fenomeno,
+    make_doc_id,
+)
 
 
 class CSVLoader(BaseLoader):
@@ -49,12 +53,30 @@ class CSVLoader(BaseLoader):
         fenomeno    = infer_fenomeno(path)
         documents: list[Document] = []
 
-        with path.open(encoding=self.encoding, errors="replace", newline="") as f:
+        with path.open(
+            encoding=self.encoding,
+            errors="replace",
+            newline=""
+        ) as f:
             reader = csv.DictReader(f, delimiter=self.delimiter)
+
             for row_num, row in enumerate(reader, start=1):
-                cols    = self.content_columns or list(row.keys())
-                # Formato: "columna: valor | columna: valor"
-                parts   = [f"{c}: {row.get(c, '')}" for c in cols if row.get(c, "").strip()]
+                cols = self.content_columns or list(row.keys())
+
+                # Formato:
+                # "columna: valor | columna: valor"
+                parts = []
+
+                for c in cols:
+                    value = row.get(c, "")
+
+                    if value is None:
+                        continue
+
+                    value_str = str(value).strip()
+
+                    if value_str:
+                        parts.append(f"{c}: {value_str}")
 
                 if self.skip_empty and not parts:
                     continue

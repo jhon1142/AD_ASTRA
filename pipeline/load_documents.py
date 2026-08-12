@@ -34,9 +34,19 @@ def load_and_clean(
         cleaner = TextCleaner()
 
     documents: list[Document] = []
+
     for source in sources:
-        active_loader = loader or default_registry.get_for(source)
-        docs = active_loader.load(source)
-        documents.extend(docs)
+        try:
+            active_loader = loader or default_registry.get_for(source)
+            docs          = active_loader.load(source)
+            documents.extend(docs)
+
+        except ValueError:
+            print(f"Saltando archivo no soportado: {source}")
+            continue
+
+        except Exception as e:
+            print(f"Error procesando {source}: {e}")
+            continue
 
     return cleaner.clean_many(documents)
