@@ -1,6 +1,7 @@
 """
 Búsqueda vectorial sobre el índice FAISS para AD_ASTRA.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -17,30 +18,43 @@ class SearchResult:
     Contenedor de un resultado de búsqueda.
 
     Attributes:
-        document: Document recuperado.
-        score:    Puntuación de similitud (mayor = más similar).
-        rank:     Posición en la lista de resultados (1-indexed).
+        document: Documento o fragmento recuperado.
+        score: Puntuación de similitud.
+        rank: Posición del resultado, comenzando en 1.
     """
 
-    def __init__(self, document: Document, score: float, rank: int) -> None:
+    def __init__(
+        self,
+        document: Document,
+        score: float,
+        rank: int,
+    ) -> None:
         self.document = document
         self.score = score
         self.rank = rank
 
     def __repr__(self) -> str:
         snippet = self.document.content[:60].replace("\n", " ")
-        return f"SearchResult(rank={self.rank}, score={self.score:.4f}, preview={snippet!r})"
+
+        return (
+            f"SearchResult("
+            f"rank={self.rank}, "
+            f"score={self.score:.4f}, "
+            f"preview={snippet!r}"
+            f")"
+        )
 
 
 class VectorSearch:
     """
-    Realiza búsquedas semánticas sobre un índice FAISS + MetadataStore.
+    Realiza búsquedas semánticas sobre un índice FAISS
+    asociado a un MetadataStore.
 
     Args:
-        faiss_manager:    Índice FAISS con los vectores.
-        metadata_store:   Store con los Documents asociados.
-        encoder:          Encoder para vectorizar la query.
-        default_k:        Número de resultados por defecto.
+        faiss_manager: Índice FAISS.
+        metadata_store: Metadata asociada a los vectores.
+        encoder: Encoder utilizado para vectorizar consultas.
+        default_k: Número de resultados por defecto.
     """
 
     def __init__(
@@ -50,10 +64,31 @@ class VectorSearch:
         encoder: Encoder,
         default_k: int = 5,
     ) -> None:
+
         self.faiss = faiss_manager
         self.metadata = metadata_store
         self.encoder = encoder
         self.default_k = default_k
+
+    # ------------------------------------------------------------------
+    # Utilidades internas
+    # ------------------------------------------------------------------
+
+    def _distance_to_score(
+        self,
+        distance: float,
+    ) -> float:
+        """
+        Convierte la distancia devuelta por FAISS en un score
+        donde un valor mayor representa mayor similitud.
+        """
+
+        if self.faiss.index_type == "flat_ip":
+            return float(distance)
+
+        return float(
+            1.0 / (1.0 + max(float(distance), 0.0))
+        )
 
     # ------------------------------------------------------------------
     # Búsqueda principal
@@ -67,57 +102,134 @@ class VectorSearch:
         score_threshold: float | None = None,
     ) -> list[SearchResult]:
         """
-        Busca los documentos más similares a la query.
+        Busca los fragmentos más similares a una consulta.
 
         Args:
-            query:           Texto de consulta.
-            k:               Número de resultados. Usa default_k si es None.
-            filters:         Filtro de metadatos aplicado post-búsqueda.
-            score_threshold: Puntuación mínima para incluir un resultado.
+            query: Texto de consulta.
+            k: Número de resultados finales.
+            filters: Filtro opcional de metadatos.
+            score_threshold: Score mínimo permitido.
 
         Returns:
-            Lista de SearchResult ordenados por score descendente.
+            Lista de SearchResult ordenada por relevancia.
         """
-        top_k = k or self.default_k
 
-        # Codificar query
-        query_vector = self.encoder.encode([query])[0].reshape(1, -1)
+        if not query or not query.strip():
+            return []
 
-        # Recuperar más resultados si hay filtros (pre-fetch)
-        fetch_k = top_k * 3 if filters else top_k
-        distances, indices = self.faiss.search(query_vector, k=fetch_k)
+        top_k = k if k is not None else self.default_k
+
+        if top_k <= 0:
+            return []
+
+        # --------------------------------------------------------------
+        # Vectorizar la consulta
+        #
+        # Se utiliza encode_query() en lugar de encode() porque algunos
+        # encoders aplican tratamiento o prefijos específicos a queries.
+        # --------------------------------------------------------------
+
+        query_vector = self.encoder.encode_query(
+            query.strip()
+        )
+
+        query_vector = np.asarray(
+            query_vector,
+            dtype=np.float32,
+        ).reshape(1, -1)
+
+        # --------------------------------------------------------------
+        # Recuperación de candidatos
+        #
+        # Recuperamos más candidatos que resultados finales para evitar
+        # limitar demasiado pronto el ranking y permitir filtros posteriores.
+        # --------------------------------------------------------------
+
+        candidate_k = max(
+            top_k * 5,
+            50,
+        )
+
+        distances, indices = self.faiss.search(
+            query_vector,
+            k=candidate_k,
+        )
 
         results: list[SearchResult] = []
+
         flat_indices = indices[0].tolist()
         flat_distances = distances[0].tolist()
 
-        for rank, (idx, dist) in enumerate(zip(flat_indices, flat_distances), start=1):
+        for idx, distance in zip(
+            flat_indices,
+            flat_distances,
+        ):
+
+            # FAISS devuelve -1 cuando no existen más resultados.
             if idx == -1:
                 continue
 
-            doc = self.metadata.get_documents([idx])[0]
+            documents = self.metadata.get_documents(
+                [idx]
+            )
 
-            # Aplicar filtro de metadatos
-            if filters and not filters.matches(doc):
+            if not documents:
                 continue
 
-            # Normalizar score: para flat_ip ya es similitud; para flat_l2 invertimos
-            score = float(dist) if self.faiss.index_type == "flat_ip" else float(1 / (1 + dist))
+            document = documents[0]
 
-            if score_threshold is not None and score < score_threshold:
+            # ----------------------------------------------------------
+            # Filtros de metadata
+            # ----------------------------------------------------------
+
+            if filters is not None:
+                if not filters.matches(document):
+                    continue
+
+            # ----------------------------------------------------------
+            # Conversión del valor FAISS a score de relevancia
+            # ----------------------------------------------------------
+
+            score = self._distance_to_score(
+                distance
+            )
+
+            if (
+                score_threshold is not None
+                and score < score_threshold
+            ):
                 continue
 
-            results.append(SearchResult(document=doc, score=score, rank=rank))
+            results.append(
+                SearchResult(
+                    document=document,
+                    score=score,
+                    rank=0,
+                )
+            )
 
-            if len(results) >= top_k:
-                break
+        # --------------------------------------------------------------
+        # Orden final
+        # --------------------------------------------------------------
 
-        # Re-rankear por score
-        results.sort(key=lambda r: r.score, reverse=True)
-        for i, r in enumerate(results, start=1):
-            r.rank = i
+        results.sort(
+            key=lambda result: result.score,
+            reverse=True,
+        )
+
+        results = results[:top_k]
+
+        for rank, result in enumerate(
+            results,
+            start=1,
+        ):
+            result.rank = rank
 
         return results
+
+    # ------------------------------------------------------------------
+    # Búsqueda directa por vector
+    # ------------------------------------------------------------------
 
     def search_by_vector(
         self,
@@ -125,24 +237,82 @@ class VectorSearch:
         k: int | None = None,
     ) -> list[SearchResult]:
         """
-        Búsqueda directamente por vector (sin encoding).
+        Ejecuta una búsqueda usando directamente un vector.
 
         Args:
-            vector: Array numpy de shape (dimensions,).
-            k:      Número de resultados.
+            vector: Vector numpy de embeddings.
+            k: Número de resultados.
 
         Returns:
             Lista de SearchResult.
         """
-        top_k = k or self.default_k
-        distances, indices = self.faiss.search(vector, k=top_k)
+
+        top_k = k if k is not None else self.default_k
+
+        if top_k <= 0:
+            return []
+
+        vector = np.asarray(
+            vector,
+            dtype=np.float32,
+        )
+
+        if vector.ndim == 1:
+            vector = vector.reshape(1, -1)
+
+        elif vector.ndim != 2:
+            raise ValueError(
+                "El vector debe tener una o dos dimensiones."
+            )
+
+        distances, indices = self.faiss.search(
+            vector,
+            k=top_k,
+        )
 
         results: list[SearchResult] = []
-        for rank, (idx, dist) in enumerate(zip(indices[0].tolist(), distances[0].tolist()), start=1):
+
+        flat_indices = indices[0].tolist()
+        flat_distances = distances[0].tolist()
+
+        for idx, distance in zip(
+            flat_indices,
+            flat_distances,
+        ):
+
             if idx == -1:
                 continue
-            doc = self.metadata.get_documents([idx])[0]
-            score = float(dist) if self.faiss.index_type == "flat_ip" else float(1 / (1 + dist))
-            results.append(SearchResult(document=doc, score=score, rank=rank))
+
+            documents = self.metadata.get_documents(
+                [idx]
+            )
+
+            if not documents:
+                continue
+
+            document = documents[0]
+
+            score = self._distance_to_score(
+                distance
+            )
+
+            results.append(
+                SearchResult(
+                    document=document,
+                    score=score,
+                    rank=0,
+                )
+            )
+
+        results.sort(
+            key=lambda result: result.score,
+            reverse=True,
+        )
+
+        for rank, result in enumerate(
+            results,
+            start=1,
+        ):
+            result.rank = rank
 
         return results
