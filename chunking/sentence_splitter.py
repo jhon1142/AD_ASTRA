@@ -252,7 +252,10 @@ class SentenceSplitter:
         chunk_start: int,
         chunk_end: int,
     ) -> int:
-       
+        """
+        Busca desde qué oración comenzar el siguiente chunk
+        para obtener overlap sin cortar oraciones.
+        """
 
         if self.overlap_tokens == 0:
             return chunk_end
@@ -299,7 +302,9 @@ class SentenceSplitter:
         text: str,
         spans: list[tuple[int, int]],
     ) -> list[str]:
-        
+        """
+        Agrupa oraciones consecutivas hasta aproximarse.
+        """
 
         chunks: list[str] = []
 
@@ -414,7 +419,10 @@ class SentenceSplitter:
         total_chunks: int,
         extra_metadata: dict[str, Any] | None = None,
     ) -> Chunk:
-        
+        """
+        Construye un Chunk preservando todos los campos
+        obligatorios del documento original.
+        """
 
         token_count = self.count_tokens(
             text
