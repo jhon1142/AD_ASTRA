@@ -134,27 +134,45 @@ class MetadataStore:
 
         return save_path
 
-    @classmethod
-    def load(cls, path: Path | str, store_documents: bool = True) -> "MetadataStore":
-        """
-        Carga el store desde disco.
+@classmethod
+def load(
+    cls,
+    path: Path | str,
+    store_documents: bool = True
+) -> "MetadataStore":
+    """
+    Carga el store desde disco.
 
-        Args:
-            path:            Ruta al archivo (.json o .pkl).
-            store_documents: Parámetro de la instancia creada.
+    Args:
+        path:            Ruta al archivo (.json o .pkl).
+        store_documents: Parámetro de la instancia creada.
 
-        Returns:
-            Instancia de MetadataStore con los registros cargados.
-        """
-        path = Path(path)
-        instance = cls(store_documents=store_documents)
+    Returns:
+        Instancia de MetadataStore con los registros cargados.
+    """
+    path = Path(path)
+    instance = cls(store_documents=store_documents)
 
-        if path.suffix in (".json", ".jsonl"):
-            instance._records = json.loads(path.read_text(encoding="utf-8"))
-        elif path.suffix in (".pkl", ".pickle"):
-            with path.open("rb") as f:
-                instance._records = pickle.load(f)
-        else:
-            raise ValueError(f"Formato de archivo no soportado: {path.suffix}")
+    if path.suffix == ".json":
+        instance._records = json.loads(
+            path.read_text(encoding="utf-8")
+        )
 
-        return instance
+    elif path.suffix == ".jsonl":
+        with path.open("r", encoding="utf-8") as f:
+            instance._records = [
+                json.loads(line)
+                for line in f
+                if line.strip()
+            ]
+
+    elif path.suffix in (".pkl", ".pickle"):
+        with path.open("rb") as f:
+            instance._records = pickle.load(f)
+
+    else:
+        raise ValueError(
+            f"Formato de archivo no soportado: {path.suffix}"
+        )
+
+    return instance

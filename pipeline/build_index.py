@@ -85,7 +85,7 @@ def build_index(
     # ── 3. Embeddings ────────────────────────────────────────────────────
     _log(verbose, f"[3/4] Generando embeddings con '{embedding_model}'...")
     encoder = Encoder(model_name=embedding_model, batch_size=batch_size, api_key=api_key)
-    vectors = encoder.encode_chunks(chunks)
+    vectors = encoder.encode_documents(chunks)
     _log(verbose, f"      Vectores shape: {vectors.shape}")
 
     # ── 4. Indexación ────────────────────────────────────────────────────
@@ -119,3 +119,20 @@ def build_index(
 def _log(verbose: bool, msg: str) -> None:
     if verbose:
         print(msg)
+
+if __name__ == "__main__":
+
+    sources = [
+        p
+        for p in Path("data/raw").rglob("*")
+        if p.is_file()
+    ]
+
+    print(f"Fuentes encontradas: {len(sources)}")
+
+    for s in sources[:10]:
+        print(s)
+
+    build_index(
+        sources=sources
+    )

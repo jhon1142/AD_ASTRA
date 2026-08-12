@@ -84,9 +84,15 @@ class TextCleaner:
         Los metadatos originales se conservan.
         """
         return Document(
-            content=self.clean_text(document.content),
-            metadata={**document.metadata, "cleaned": True},
             doc_id=document.doc_id,
+            fuente=document.fuente,
+            formato=document.formato,
+            fenomeno=document.fenomeno,
+            content=self.clean_text(document.content),
+            metadata={
+                **document.metadata,
+                "cleaned": True,
+            },
         )
 
     def clean_many(self, documents: list[Document]) -> list[Document]:
