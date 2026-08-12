@@ -1,98 +1,384 @@
 """
-Splitter basado en oraciones para documentos AD_ASTRA.
+Chunking por oraciones completas para AD_ASTRA — CODEFEST 2026.
 
-Usa spaCy para segmentación precisa de oraciones cuando está disponible,
-con fallback a regex para entornos sin spaCy.
+Características:
+- Nunca divide una oración entre dos chunks.
+- Mide tokens reales con el tokenizer del encoder.
+- Mantiene overlap únicamente mediante oraciones completas.
+- Conserva doc_id, fuente, formato, fenómeno y metadata.
+- Produce objetos Chunk listos para FAISS.
+- CSV/XLSX se mantienen por fila, tal como fueron extraídos.
 """
+
 from __future__ import annotations
 
 import re
+from typing import Any
 
-from config.settings import DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
+from transformers import AutoTokenizer
+
+from config.settings import (
+    CHUNK_SIZE_MAX,
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
+    EMBEDDING_MODEL,
+)
+from core.chunk import Chunk
 from core.document import Document
+from embeddings.models import get_embedding_model
 
 
 class SentenceSplitter:
-    """
-    Divide texto en chunks respetando límites de oración.
 
-    Agrupa oraciones consecutivas hasta alcanzar chunk_size caracteres,
-    luego inicia un nuevo chunk con solapamiento opcional.
-
-    Args:
-        chunk_size:    Tamaño máximo de cada chunk en caracteres.
-        chunk_overlap: Número de oraciones solapadas entre chunks consecutivos.
-        spacy_model:   Modelo de spaCy a usar, e.g. 'es_core_news_sm'.
-                       Si es None o no está instalado, usa regex.
-    """
-
-    # Regex de fallback: divide en puntos, signos de exclamación e interrogación
-    _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+    TABULAR_FORMATS = {
+        "csv",
+        "xlsx",
+        "xls",
+    }
 
     def __init__(
         self,
-        chunk_size: int = DEFAULT_CHUNK_SIZE,
-        chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-        spacy_model: str | None = None,
+        target_tokens: int = DEFAULT_CHUNK_SIZE,
+        overlap_tokens: int = DEFAULT_CHUNK_OVERLAP,
+        max_tokens: int = CHUNK_SIZE_MAX,
+        tokenizer_name: str = EMBEDDING_MODEL,
     ) -> None:
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.spacy_model = spacy_model
-        self._nlp = self._load_spacy(spacy_model)
+
+        if target_tokens <= 0:
+            raise ValueError(
+                "target_tokens debe ser mayor que 0"
+            )
+
+        if max_tokens < target_tokens:
+            raise ValueError(
+                "max_tokens debe ser mayor o igual que target_tokens"
+            )
+
+        if overlap_tokens < 0:
+            raise ValueError(
+                "overlap_tokens no puede ser negativo"
+            )
+
+        if overlap_tokens >= target_tokens:
+            raise ValueError(
+                "overlap_tokens debe ser menor que target_tokens"
+            )
+
+        self.target_tokens = target_tokens
+        self.overlap_tokens = overlap_tokens
+        self.max_tokens = max_tokens
+        self.tokenizer_name = tokenizer_name
+
+        model_info = get_embedding_model(
+            tokenizer_name
+        )
+
+        self.encoder_max_tokens = (
+            model_info.max_tokens
+        )
+
+        if self.max_tokens > self.encoder_max_tokens:
+            raise ValueError(
+                "El límite de chunk supera la capacidad "
+                f"del encoder: {self.max_tokens} > "
+                f"{self.encoder_max_tokens}"
+            )
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name,
+            use_fast=True,
+        )
+
+        self._nlp = self._create_sentence_segmenter()
+
+    # ------------------------------------------------------------------
+    # Tokenización
+    # ------------------------------------------------------------------
+
+    def count_tokens(
+        self,
+        text: str,
+    ) -> int:
+
+        if not text:
+            return 0
+
+        token_ids = self.tokenizer.encode(
+            text,
+            add_special_tokens=False,
+            truncation=False,
+        )
+
+        return len(token_ids)
+
+    # ------------------------------------------------------------------
+    # Segmentación de oraciones
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def _load_spacy(model: str | None):
-        if model is None:
-            return None
+    def _create_sentence_segmenter():
+
         try:
             import spacy
-            return spacy.load(model, disable=["ner", "tagger", "parser", "lemmatizer"])
+
+            nlp = spacy.blank("xx")
+
+            if "sentencizer" not in nlp.pipe_names:
+                nlp.add_pipe("sentencizer")
+
+            return nlp
+
         except Exception:
             return None
 
-    # ------------------------------------------------------------------
-    # Segmentación
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _trim_span(
+        text: str,
+        start: int,
+        end: int,
+    ) -> tuple[int, int]:
 
-    def _get_sentences(self, text: str) -> list[str]:
-        """Devuelve lista de oraciones usando spaCy o regex."""
+        raw = text[start:end]
+
+        left_trim = len(raw) - len(
+            raw.lstrip()
+        )
+
+        right_trim = len(raw) - len(
+            raw.rstrip()
+        )
+
+        start += left_trim
+        end -= right_trim
+
+        return start, end
+
+    def _sentence_spans(
+        self,
+        text: str,
+    ) -> list[tuple[int, int]]:
+
+        if not text or not text.strip():
+            return []
+
+        spans: list[tuple[int, int]] = []
+
+        # --------------------------------------------------------------
+        # spaCy
+        # --------------------------------------------------------------
+
         if self._nlp is not None:
+
             doc = self._nlp(text)
-            return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
-        return [s.strip() for s in self._SENTENCE_RE.split(text) if s.strip()]
+
+            for sentence in doc.sents:
+
+                start, end = self._trim_span(
+                    text,
+                    sentence.start_char,
+                    sentence.end_char,
+                )
+
+                if start < end:
+                    spans.append(
+                        (start, end)
+                    )
+
+        # --------------------------------------------------------------
+        # Fallback regex
+        # --------------------------------------------------------------
+
+        else:
+
+            pattern = re.compile(
+                r"[^.!?]+(?:[.!?]+|$)",
+                flags=re.MULTILINE,
+            )
+
+            for match in pattern.finditer(text):
+
+                start, end = self._trim_span(
+                    text,
+                    match.start(),
+                    match.end(),
+                )
+
+                if start < end:
+                    spans.append(
+                        (start, end)
+                    )
+
+        # Si por alguna razón no se detectaron oraciones,
+        # conservamos el documento completo.
+        if not spans and text.strip():
+
+            start = len(text) - len(
+                text.lstrip()
+            )
+
+            end = len(
+                text.rstrip()
+            )
+
+            spans.append(
+                (start, end)
+            )
+
+        return spans
 
     # ------------------------------------------------------------------
-    # Agrupación en chunks
+    # Construcción de chunks
     # ------------------------------------------------------------------
 
-    def _group_sentences(self, sentences: list[str]) -> list[str]:
-        """Agrupa oraciones en chunks respetando chunk_size y chunk_overlap."""
+    def _text_from_spans(
+        self,
+        text: str,
+        spans: list[tuple[int, int]],
+        start_index: int,
+        end_index: int,
+    ) -> str:
+
+        start_char = spans[start_index][0]
+        end_char = spans[end_index - 1][1]
+
+        return text[
+            start_char:end_char
+        ].strip()
+
+    def _find_overlap_start(
+        self,
+        text: str,
+        spans: list[tuple[int, int]],
+        chunk_start: int,
+        chunk_end: int,
+    ) -> int:
+       
+
+        if self.overlap_tokens == 0:
+            return chunk_end
+
+        overlap_start = chunk_end
+        accumulated_tokens = 0
+
+        index = chunk_end - 1
+
+        # index > chunk_start evita reutilizar el chunk completo
+        # y garantiza avance.
+        while index > chunk_start:
+
+            sentence_text = text[
+                spans[index][0]:
+                spans[index][1]
+            ]
+
+            sentence_tokens = self.count_tokens(
+                sentence_text
+            )
+
+            if (
+                accumulated_tokens
+                + sentence_tokens
+                > self.overlap_tokens
+            ):
+                break
+
+            accumulated_tokens += (
+                sentence_tokens
+            )
+
+            overlap_start = index
+            index -= 1
+
+        if overlap_start <= chunk_start:
+            return chunk_end
+
+        return overlap_start
+
+    def _group_sentence_spans(
+        self,
+        text: str,
+        spans: list[tuple[int, int]],
+    ) -> list[str]:
+        
+
         chunks: list[str] = []
+
         start = 0
+        total_sentences = len(spans)
 
-        while start < len(sentences):
-            current_chunk: list[str] = []
-            current_len = 0
-            i = start
+        while start < total_sentences:
 
-            while i < len(sentences):
-                sent = sentences[i]
-                if current_len + len(sent) + 1 > self.chunk_size and current_chunk:
-                    break
-                current_chunk.append(sent)
-                current_len += len(sent) + 1
-                i += 1
+            end = start
+            best_end = start
 
-            chunks.append(" ".join(current_chunk))
+            while end < total_sentences:
 
-            # Avanzar dejando overlap de oraciones
-            overlap_chars = 0
-            overlap_start = i - 1
-            while overlap_start > start and overlap_chars < self.chunk_overlap:
-                overlap_chars += len(sentences[overlap_start])
-                overlap_start -= 1
+                candidate = self._text_from_spans(
+                    text,
+                    spans,
+                    start,
+                    end + 1,
+                )
 
-            start = max(start + 1, overlap_start + 1)
+                token_count = self.count_tokens(
+                    candidate
+                )
+
+                # Chunk dentro del objetivo.
+                if token_count <= self.target_tokens:
+
+                    best_end = end + 1
+                    end += 1
+                    continue
+
+                # Si una única oración supera el objetivo,
+                # se conserva completa.
+                if best_end == start:
+
+                    if token_count > self.encoder_max_tokens:
+                        raise ValueError(
+                            "Se encontró una oración que supera "
+                            "el límite máximo del encoder "
+                            f"({token_count} tokens > "
+                            f"{self.encoder_max_tokens}). "
+                            "No puede dividirse sin incumplir "
+                            "el requisito de oración completa."
+                        )
+
+                    best_end = end + 1
+
+                break
+
+            if best_end == start:
+                best_end = start + 1
+
+            chunk_text = self._text_from_spans(
+                text,
+                spans,
+                start,
+                best_end,
+            )
+
+            if chunk_text:
+                chunks.append(
+                    chunk_text
+                )
+
+            if best_end >= total_sentences:
+                break
+
+            next_start = self._find_overlap_start(
+                text=text,
+                spans=spans,
+                chunk_start=start,
+                chunk_end=best_end,
+            )
+
+            # Protección contra loops.
+            if next_start <= start:
+                next_start = best_end
+
+            start = next_start
 
         return chunks
 
@@ -100,33 +386,145 @@ class SentenceSplitter:
     # API pública
     # ------------------------------------------------------------------
 
-    def split_text(self, text: str) -> list[str]:
-        """Divide una cadena respetando límites de oración."""
-        sentences = self._get_sentences(text)
-        if not sentences:
-            return [text] if text.strip() else []
-        return self._group_sentences(sentences)
+    def split_text(
+        self,
+        text: str,
+    ) -> list[str]:
+        """
+        Divide texto manteniendo oraciones completas.
+        """
 
-    def split_document(self, document: Document) -> list[Document]:
-        """Divide un Document en chunks a nivel de oración."""
-        chunks = self.split_text(document.content)
-        return [
-            Document(
-                content=chunk,
-                metadata={
-                    **document.metadata,
-                    "chunk_index": i,
-                    "total_chunks": len(chunks),
-                    "splitter": "sentence",
-                },
-                doc_id=f"{document.doc_id}_sent{i}" if document.doc_id else "",
+        spans = self._sentence_spans(
+            text
+        )
+
+        if not spans:
+            return []
+
+        return self._group_sentence_spans(
+            text,
+            spans,
+        )
+
+    def _build_chunk(
+        self,
+        document: Document,
+        text: str,
+        position: int,
+        total_chunks: int,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> Chunk:
+        
+
+        token_count = self.count_tokens(
+            text
+        )
+
+        if token_count > self.encoder_max_tokens:
+            raise ValueError(
+                f"Chunk {document.doc_id} posición {position} "
+                f"tiene {token_count} tokens y supera "
+                f"el máximo del encoder "
+                f"({self.encoder_max_tokens})."
             )
-            for i, chunk in enumerate(chunks)
+
+        metadata: dict[str, Any] = {
+            **document.metadata,
+            "total_chunks": total_chunks,
+            "splitter": "sentence_token",
+            "target_tokens": self.target_tokens,
+            "max_tokens": self.max_tokens,
+        }
+
+        if extra_metadata:
+            metadata.update(
+                extra_metadata
+            )
+
+        return Chunk(
+            chunk_id=(
+                f"{document.doc_id}-chunk-"
+                f"{position:04d}"
+            ),
+            doc_id=document.doc_id,
+            fuente=document.fuente,
+            formato=document.formato,
+            fenomeno=document.fenomeno,
+            posicion=position,
+            num_tokens=token_count,
+            texto=text,
+            metadata=metadata,
+        )
+
+    def split_document(
+        self,
+        document: Document,
+    ) -> list[Chunk]:
+        """
+        Convierte un Document en uno o varios Chunk.
+
+        CSV/XLSX ya llegan al pipeline como filas independientes,
+        por lo que se conserva cada fila como una sola unidad.
+        """
+
+        if not document.content.strip():
+            return []
+
+        # --------------------------------------------------------------
+        # Datos tabulares
+        # --------------------------------------------------------------
+
+        if document.formato.lower() in self.TABULAR_FORMATS:
+
+            return [
+                self._build_chunk(
+                    document=document,
+                    text=document.content.strip(),
+                    position=0,
+                    total_chunks=1,
+                    extra_metadata={
+                        "structured_row": True,
+                    },
+                )
+            ]
+
+        # --------------------------------------------------------------
+        # Texto narrativo
+        # --------------------------------------------------------------
+
+        texts = self.split_text(
+            document.content
+        )
+
+        total_chunks = len(texts)
+
+        return [
+            self._build_chunk(
+                document=document,
+                text=chunk_text,
+                position=position,
+                total_chunks=total_chunks,
+            )
+            for position, chunk_text
+            in enumerate(texts)
         ]
 
-    def split_documents(self, documents: list[Document]) -> list[Document]:
-        """Aplica split_document() a una lista de documentos."""
-        result: list[Document] = []
-        for doc in documents:
-            result.extend(self.split_document(doc))
-        return result
+    def split_documents(
+        self,
+        documents: list[Document],
+    ) -> list[Chunk]:
+        """
+        Aplica el chunking a todos los documentos.
+        """
+
+        chunks: list[Chunk] = []
+
+        for document in documents:
+
+            chunks.extend(
+                self.split_document(
+                    document
+                )
+            )
+
+        return chunks
