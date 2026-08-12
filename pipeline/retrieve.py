@@ -42,19 +42,27 @@ class Retriever:
         index_path: Union[str, Path, None] = None,
         metadata_path: Union[str, Path, None] = None,
         embedding_model: str = EMBEDDING_MODEL,
-        api_key: str | None = None,
         default_k: int = 5,
         index_type: str = "flat_ip",
     ) -> None:
         base = Path(VECTORSTORE_PATH)
-        self._index_path    = Path(index_path)    if index_path    else base / "faiss.index"
-        self._metadata_path = Path(metadata_path) if metadata_path else base / "metadata.json"
 
-        self.encoder = Encoder(
-            model_name=embedding_model,
-            batch_size=EMBEDDING_BATCH_SIZE,
-            api_key=api_key,
-        )
+self._index_path = (
+    Path(index_path)
+    if index_path
+    else base / "index.faiss"
+)
+
+self._metadata_path = (
+    Path(metadata_path)
+    if metadata_path
+    else base / "metadata.jsonl"
+)
+
+      self.encoder = Encoder(
+    model_name=embedding_model,
+    batch_size=EMBEDDING_BATCH_SIZE,
+)
 
         self.faiss_mgr    = FAISSManager.load(
             self._index_path,
