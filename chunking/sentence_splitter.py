@@ -7,7 +7,9 @@ Características:
 - Mantiene overlap únicamente mediante oraciones completas.
 - Conserva doc_id, fuente, formato, fenómeno y metadata.
 - Produce objetos Chunk listos para FAISS.
-- CSV/XLSX se mantienen por fila, tal como fueron extraídos.
+- CSV/XLSX se mantienen por fila.
+- Todas las filas de un mismo archivo tabular pueden compartir doc_id.
+- Cada fila tabular recibe posicion y chunk_id únicos.
 """
 
 from __future__ import annotations
@@ -29,6 +31,19 @@ from embeddings.models import get_embedding_model
 
 
 class SentenceSplitter:
+    """
+    Divide documentos respetando límites completos de oración.
+
+    Para documentos narrativos:
+    - agrupa oraciones completas;
+    - utiliza tokens reales;
+    - aplica overlap mediante oraciones completas.
+
+    Para CSV/XLSX:
+    - cada fila permanece como fragmento independiente;
+    - todas las filas del archivo pueden compartir doc_id;
+    - cada fila recibe posicion y chunk_id únicos.
+    """
 
     TABULAR_FORMATS = {
         "csv",
@@ -99,6 +114,10 @@ class SentenceSplitter:
         self,
         text: str,
     ) -> int:
+        """
+        Cuenta tokens reales utilizando el tokenizer
+        correspondiente al encoder configurado.
+        """
 
         if not text:
             return 0
@@ -117,6 +136,11 @@ class SentenceSplitter:
 
     @staticmethod
     def _create_sentence_segmenter():
+        """
+        Crea un segmentador multilingüe ligero con spaCy.
+
+        Si spaCy no está disponible, posteriormente se utiliza regex.
+        """
 
         try:
             import spacy
@@ -137,6 +161,10 @@ class SentenceSplitter:
         start: int,
         end: int,
     ) -> tuple[int, int]:
+        """
+        Elimina espacios únicamente de los extremos del span,
+        conservando intacto el contenido interno.
+        """
 
         raw = text[start:end]
 
@@ -157,6 +185,12 @@ class SentenceSplitter:
         self,
         text: str,
     ) -> list[tuple[int, int]]:
+        """
+        Obtiene posiciones de inicio y fin de cada oración.
+
+        Utilizar offsets permite recuperar posteriormente el texto
+        directamente del contenido original limpio.
+        """
 
         if not text or not text.strip():
             return []
@@ -164,7 +198,7 @@ class SentenceSplitter:
         spans: list[tuple[int, int]] = []
 
         # --------------------------------------------------------------
-        # spaCy
+        # Segmentación con spaCy
         # --------------------------------------------------------------
 
         if self._nlp is not None:
@@ -185,7 +219,7 @@ class SentenceSplitter:
                     )
 
         # --------------------------------------------------------------
-        # Fallback regex
+        # Fallback mediante regex
         # --------------------------------------------------------------
 
         else:
@@ -208,8 +242,8 @@ class SentenceSplitter:
                         (start, end)
                     )
 
-        # Si por alguna razón no se detectaron oraciones,
-        # conservamos el documento completo.
+        # Si no fue posible detectar oraciones,
+        # conserva el texto completo como una unidad.
         if not spans and text.strip():
 
             start = len(text) - len(
@@ -227,7 +261,7 @@ class SentenceSplitter:
         return spans
 
     # ------------------------------------------------------------------
-    # Construcción de chunks
+    # Construcción de texto desde spans
     # ------------------------------------------------------------------
 
     def _text_from_spans(
@@ -237,6 +271,11 @@ class SentenceSplitter:
         start_index: int,
         end_index: int,
     ) -> str:
+        """
+        Extrae un fragmento directamente del texto original.
+
+        end_index es exclusivo.
+        """
 
         start_char = spans[start_index][0]
         end_char = spans[end_index - 1][1]
@@ -244,6 +283,10 @@ class SentenceSplitter:
         return text[
             start_char:end_char
         ].strip()
+
+    # ------------------------------------------------------------------
+    # Overlap
+    # ------------------------------------------------------------------
 
     def _find_overlap_start(
         self,
@@ -253,8 +296,9 @@ class SentenceSplitter:
         chunk_end: int,
     ) -> int:
         """
-        Busca desde qué oración comenzar el siguiente chunk
-        para obtener overlap sin cortar oraciones.
+        Calcula desde qué oración debe comenzar el siguiente chunk.
+
+        El overlap se realiza exclusivamente mediante oraciones completas.
         """
 
         if self.overlap_tokens == 0:
@@ -265,8 +309,8 @@ class SentenceSplitter:
 
         index = chunk_end - 1
 
-        # index > chunk_start evita reutilizar el chunk completo
-        # y garantiza avance.
+        # index > chunk_start impide reutilizar el chunk entero
+        # y garantiza que siempre exista avance.
         while index > chunk_start:
 
             sentence_text = text[
@@ -297,13 +341,19 @@ class SentenceSplitter:
 
         return overlap_start
 
+    # ------------------------------------------------------------------
+    # Agrupación de oraciones
+    # ------------------------------------------------------------------
+
     def _group_sentence_spans(
         self,
         text: str,
         spans: list[tuple[int, int]],
     ) -> list[str]:
         """
-        Agrupa oraciones consecutivas hasta aproximarse.
+        Agrupa oraciones consecutivas respetando target_tokens.
+
+        Nunca corta una oración por la mitad.
         """
 
         chunks: list[str] = []
@@ -329,15 +379,17 @@ class SentenceSplitter:
                     candidate
                 )
 
-                # Chunk dentro del objetivo.
+                # La oración o conjunto de oraciones todavía
+                # está dentro del tamaño objetivo.
                 if token_count <= self.target_tokens:
 
                     best_end = end + 1
                     end += 1
+
                     continue
 
-                # Si una única oración supera el objetivo,
-                # se conserva completa.
+                # Si una sola oración supera target_tokens,
+                # debe conservarse completa.
                 if best_end == start:
 
                     if token_count > self.encoder_max_tokens:
@@ -379,7 +431,7 @@ class SentenceSplitter:
                 chunk_end=best_end,
             )
 
-            # Protección contra loops.
+            # Protección contra loops infinitos.
             if next_start <= start:
                 next_start = best_end
 
@@ -388,7 +440,7 @@ class SentenceSplitter:
         return chunks
 
     # ------------------------------------------------------------------
-    # API pública
+    # API pública de texto
     # ------------------------------------------------------------------
 
     def split_text(
@@ -396,7 +448,7 @@ class SentenceSplitter:
         text: str,
     ) -> list[str]:
         """
-        Divide texto manteniendo oraciones completas.
+        Divide texto narrativo manteniendo oraciones completas.
         """
 
         spans = self._sentence_spans(
@@ -410,6 +462,10 @@ class SentenceSplitter:
             text,
             spans,
         )
+
+    # ------------------------------------------------------------------
+    # Construcción del objeto Chunk
+    # ------------------------------------------------------------------
 
     def _build_chunk(
         self,
@@ -464,6 +520,10 @@ class SentenceSplitter:
             metadata=metadata,
         )
 
+    # ------------------------------------------------------------------
+    # División de un documento individual
+    # ------------------------------------------------------------------
+
     def split_document(
         self,
         document: Document,
@@ -471,8 +531,14 @@ class SentenceSplitter:
         """
         Convierte un Document en uno o varios Chunk.
 
-        CSV/XLSX ya llegan al pipeline como filas independientes,
-        por lo que se conserva cada fila como una sola unidad.
+        Para documentos narrativos:
+            genera múltiples chunks por oraciones.
+
+        Para una fila CSV/XLSX individual:
+            utiliza fila_indice como posición provisional.
+
+        El procesamiento completo de datos tabulares se realiza
+        principalmente mediante split_documents().
         """
 
         if not document.content.strip():
@@ -482,13 +548,23 @@ class SentenceSplitter:
         # Datos tabulares
         # --------------------------------------------------------------
 
-        if document.formato.lower() in self.TABULAR_FORMATS:
+        if (
+            document.formato.lower()
+            in self.TABULAR_FORMATS
+        ):
+
+            position = int(
+                document.metadata.get(
+                    "fila_indice",
+                    0,
+                )
+            )
 
             return [
                 self._build_chunk(
                     document=document,
                     text=document.content.strip(),
-                    position=0,
+                    position=position,
                     total_chunks=1,
                     extra_metadata={
                         "structured_row": True,
@@ -504,7 +580,9 @@ class SentenceSplitter:
             document.content
         )
 
-        total_chunks = len(texts)
+        total_chunks = len(
+            texts
+        )
 
         return [
             self._build_chunk(
@@ -517,17 +595,117 @@ class SentenceSplitter:
             in enumerate(texts)
         ]
 
+    # ------------------------------------------------------------------
+    # División de múltiples documentos
+    # ------------------------------------------------------------------
+
     def split_documents(
         self,
         documents: list[Document],
     ) -> list[Chunk]:
         """
-        Aplica el chunking a todos los documentos.
+        Aplica chunking a todos los documentos.
+
+        Para CSV/XLSX:
+        - todas las filas del archivo comparten doc_id;
+        - cada fila recibe una posición consecutiva;
+        - cada fila recibe chunk_id único;
+        - total_chunks representa la cantidad total de filas útiles.
+
+        Para documentos narrativos:
+        utiliza split_document().
         """
 
         chunks: list[Chunk] = []
 
+        # --------------------------------------------------------------
+        # Primera pasada
+        #
+        # Contar cuántas filas útiles existen para cada documento
+        # tabular identificado por doc_id.
+        # --------------------------------------------------------------
+
+        tabular_totals: dict[str, int] = {}
+
         for document in documents:
+
+            if not document.content.strip():
+                continue
+
+            if (
+                document.formato.lower()
+                in self.TABULAR_FORMATS
+            ):
+
+                tabular_totals[
+                    document.doc_id
+                ] = (
+                    tabular_totals.get(
+                        document.doc_id,
+                        0,
+                    )
+                    + 1
+                )
+
+        # --------------------------------------------------------------
+        # Segunda pasada
+        #
+        # Asignar posiciones consecutivas dentro de cada archivo.
+        # --------------------------------------------------------------
+
+        tabular_positions: dict[str, int] = {}
+
+        for document in documents:
+
+            if not document.content.strip():
+                continue
+
+            # ----------------------------------------------------------
+            # CSV / XLSX
+            # ----------------------------------------------------------
+
+            if (
+                document.formato.lower()
+                in self.TABULAR_FORMATS
+            ):
+
+                position = (
+                    tabular_positions.get(
+                        document.doc_id,
+                        0,
+                    )
+                )
+
+                total_chunks = (
+                    tabular_totals[
+                        document.doc_id
+                    ]
+                )
+
+                chunks.append(
+                    self._build_chunk(
+                        document=document,
+                        text=document.content.strip(),
+                        position=position,
+                        total_chunks=total_chunks,
+                        extra_metadata={
+                            "structured_row": True,
+                            "fila_indice_chunk": position,
+                        },
+                    )
+                )
+
+                tabular_positions[
+                    document.doc_id
+                ] = (
+                    position + 1
+                )
+
+                continue
+
+            # ----------------------------------------------------------
+            # Documentos narrativos
+            # ----------------------------------------------------------
 
             chunks.extend(
                 self.split_document(

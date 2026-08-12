@@ -1,10 +1,13 @@
 """
-Parser para archivos CSV.
+Parser para archivos CSV — AD_ASTRA CODEFEST 2026.
 
-Según el spec: leer la cabecera y recorrer registros uno a uno,
-obteniendo cada fila como pares columna:valor. Cada fila puede
-tratarse como unidad de fragmentación independiente.
+Reglas:
+- El archivo completo representa un único documento.
+- Todas las filas comparten el mismo doc_id.
+- Cada fila se conserva como unidad independiente de fragmentación.
+- Cada valor se representa como columna: valor.
 """
+
 from __future__ import annotations
 
 import csv
@@ -22,17 +25,14 @@ from data.parsers.base_loader import (
 
 class CSVLoader(BaseLoader):
     """
-    Parsea un archivo CSV. Produce un Document por fila.
+    Parsea un CSV preservando la identidad documental del archivo.
 
-    Cada valor conserva el nombre de su columna como contexto,
-    formateado como "columna: valor | columna: valor ...".
+    Cada fila se devuelve temporalmente como un Document independiente
+    para que el pipeline pueda limpiarla individualmente, pero todas
+    comparten el mismo doc_id correspondiente al archivo original.
 
-    Args:
-        content_columns: Columnas a incluir en el contenido.
-                         None = todas las columnas.
-        delimiter:       Separador de campos.
-        encoding:        Codificación del archivo.
-        skip_empty:      Si True, omite filas completamente vacías.
+    Posteriormente SentenceSplitter convierte cada fila en un Chunk
+    independiente con posicion y chunk_id únicos.
     """
 
     def __init__(
@@ -42,57 +42,101 @@ class CSVLoader(BaseLoader):
         encoding: str = DEFAULT_ENCODING,
         skip_empty: bool = True,
     ) -> None:
+
         self.content_columns = content_columns
         self.delimiter = delimiter
         self.encoding = encoding
         self.skip_empty = skip_empty
 
-    def load(self, source: Union[str, Path]) -> list[Document]:
-        path        = Path(source)
-        doc_id_base = make_doc_id(path)
-        fenomeno    = infer_fenomeno(path)
+    def load(
+        self,
+        source: Union[str, Path],
+    ) -> list[Document]:
+
+        path = Path(source)
+
+        # IMPORTANTE:
+        # Un único doc_id por ARCHIVO, no por fila.
+        doc_id = make_doc_id(path)
+
+        fenomeno = infer_fenomeno(path)
+
         documents: list[Document] = []
 
         with path.open(
             encoding=self.encoding,
             errors="replace",
-            newline=""
-        ) as f:
-            reader = csv.DictReader(f, delimiter=self.delimiter)
+            newline="",
+        ) as file:
 
-            for row_num, row in enumerate(reader, start=1):
-                cols = self.content_columns or list(row.keys())
+            reader = csv.DictReader(
+                file,
+                delimiter=self.delimiter,
+            )
 
-                # Formato:
-                # "columna: valor | columna: valor"
-                parts = []
+            for row_num, row in enumerate(
+                reader,
+                start=1,
+            ):
 
-                for c in cols:
-                    value = row.get(c, "")
+                cols = (
+                    self.content_columns
+                    or list(row.keys())
+                )
+
+                parts: list[str] = []
+
+                for column in cols:
+
+                    value = row.get(
+                        column,
+                        "",
+                    )
 
                     if value is None:
                         continue
 
-                    value_str = str(value).strip()
+                    value_str = str(
+                        value
+                    ).strip()
 
                     if value_str:
-                        parts.append(f"{c}: {value_str}")
 
-                if self.skip_empty and not parts:
+                        parts.append(
+                            f"{column}: {value_str}"
+                        )
+
+                if (
+                    self.skip_empty
+                    and not parts
+                ):
                     continue
 
-                content = " | ".join(parts)
+                content = " | ".join(
+                    parts
+                )
 
                 documents.append(
                     Document(
-                        doc_id   = f"{doc_id_base}_{row_num:05d}",
-                        fuente   = path.name,
-                        formato  = "csv",
-                        fenomeno = fenomeno,
-                        content  = content,
-                        metadata = {
+                        # Todas las filas tienen el MISMO doc_id.
+                        doc_id=doc_id,
+
+                        fuente=path.name,
+                        formato="csv",
+                        fenomeno=fenomeno,
+
+                        content=content,
+
+                        metadata={
                             "ruta_completa": str(path),
+
+                            # Número ordinal de la fila de datos.
                             "fila": row_num,
+
+                            # Índice original base 0.
+                            "fila_indice": row_num - 1,
+
+                            "tipo_unidad": "fila",
                         },
                     )
                 )
