@@ -1,23 +1,28 @@
 """
 Pipeline de construcción del índice vectorial para AD_ASTRA.
 
-Orquesta: load → clean → chunk → embed → store (FAISS + MetadataStore).
+Flujo:
+    load -> clean -> sentence chunking -> embeddings
+    -> FAISS -> metadata.jsonl
 """
+
 from __future__ import annotations
 
 import time
-import torch
 from pathlib import Path
 from typing import Union
 
+import torch
+
+from chunking.sentence_splitter import SentenceSplitter
 from config.settings import (
-    DEFAULT_CHUNK_SIZE,
+    CHUNK_SIZE_MAX,
     DEFAULT_CHUNK_OVERLAP,
-    EMBEDDING_MODEL,
+    DEFAULT_CHUNK_SIZE,
     EMBEDDING_BATCH_SIZE,
+    EMBEDDING_MODEL,
     VECTORSTORE_PATH,
 )
-from chunking.splitter import RecursiveCharacterSplitter
 from core.chunk import Chunk
 from embeddings.encoder import Encoder
 from pipeline.load_documents import load_and_clean
@@ -26,113 +31,279 @@ from vectorstore.faiss_manager import FAISSManager
 from vectorstore.metadata_store import MetadataStore
 
 
+def _detect_device() -> str:
+   
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    if (
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    ):
+        return "mps"
+
+    return "cpu"
+
+
 def build_index(
     sources: list[Union[str, Path]],
-    # ── Chunking ─────────────────────────────────────────────
+
+    # Chunking
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-    # ── Embeddings ───────────────────────────────────────────
+    chunk_max_tokens: int = CHUNK_SIZE_MAX,
+
+    # Embeddings
     embedding_model: str = EMBEDDING_MODEL,
     batch_size: int = EMBEDDING_BATCH_SIZE,
-    api_key: str | None = None,
-    # ── Vectorstore ──────────────────────────────────────────
+
+    # Vectorstore
     index_type: str = "flat_ip",
     save_path: Path | str | None = None,
-    # ── Opciones ─────────────────────────────────────────────
+
+    # Opciones
     cleaner: TextCleaner | None = None,
     verbose: bool = True,
+
 ) -> tuple[FAISSManager, MetadataStore]:
-    """
-    Construye el índice vectorial completo desde las fuentes indicadas.
+    
 
-    Pasos:
-        1. Carga y limpieza de documentos.
-        2. Chunking recursivo por caracteres.
-        3. Generación de embeddings.
-        4. Indexación en FAISS + MetadataStore.
-        5. Persistencia en disco.
+    start_time = time.perf_counter()
 
-    Args:
-        sources:         Lista de rutas o URLs a indexar.
-        chunk_size:      Tamaño máximo de chunk en caracteres.
-        chunk_overlap:   Solapamiento entre chunks.
-        embedding_model: Nombre del modelo de embedding (ver embeddings/models.py).
-        batch_size:      Tamaño de batch para la API de embeddings.
-        api_key:         API key del proveedor (None = variable de entorno).
-        index_type:      Tipo de índice FAISS ('flat_l2', 'flat_ip', 'ivf_flat').
-        save_path:       Directorio donde guardar el índice. None = VECTORSTORE_PATH.
-        cleaner:         TextCleaner personalizado. None = configuración por defecto.
-        verbose:         Imprimir progreso en consola.
+    # ------------------------------------------------------------------
+    # 1. Carga y limpieza
+    # ------------------------------------------------------------------
 
-    Returns:
-        Tupla (FAISSManager, MetadataStore) ya persistidos en disco.
-    """
-    t_start = time.perf_counter()
-
-    # ── 1. Carga y limpieza ──────────────────────────────────────────────
-    _log(verbose, f"[1/4] Cargando {len(sources)} fuente(s)...")
-    documents = load_and_clean(sources, cleaner=cleaner)
-    _log(verbose, f"      {len(documents)} documento(s) cargados y limpios.")
-
-    # ── 2. Chunking ──────────────────────────────────────────────────────
-    _log(verbose, f"[2/4] Chunking (size={chunk_size}, overlap={chunk_overlap})...")
-    splitter = RecursiveCharacterSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+    _log(
+        verbose,
+        f"[1/4] Cargando {len(sources)} fuente(s)..."
     )
-    chunks: list[Chunk] = splitter.split_documents(documents)
-    _log(verbose, f"      {len(chunks)} chunk(s) generados.")
 
-    # ── 3. Embeddings ────────────────────────────────────────────────────
-    _log(verbose, f"[3/4] Generando embeddings con '{embedding_model}'...")
-    encoder = Encoder(model_name=embedding_model, batch_size=batch_size, device="cuda",show_progress=True,)
-    vectors = encoder.encode_chunks(chunks)
-    _log(verbose, f"      Vectores shape: {vectors.shape}")
+    documents = load_and_clean(
+        sources,
+        cleaner=cleaner,
+    )
 
-    # ── 4. Indexación ────────────────────────────────────────────────────
-    _log(verbose, "[4/4] Indexando en FAISS y guardando...")
-    faiss_mgr = FAISSManager(dimensions=encoder.dimensions, index_type=index_type)
+    _log(
+        verbose,
+        f"      {len(documents)} documento(s) "
+        "cargados y limpios."
+    )
+
+    if not documents:
+        raise ValueError(
+            "No se cargó ningún documento."
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Chunking por oraciones completas
+    # ------------------------------------------------------------------
+
+    _log(
+        verbose,
+        (
+            "[2/4] Chunking por oraciones "
+            f"(target={chunk_size} tokens, "
+            f"max={chunk_max_tokens}, "
+            f"overlap={chunk_overlap})..."
+        ),
+    )
+
+    splitter = SentenceSplitter(
+        target_tokens=chunk_size,
+        overlap_tokens=chunk_overlap,
+        max_tokens=chunk_max_tokens,
+        tokenizer_name=embedding_model,
+    )
+
+    chunks: list[Chunk] = (
+        splitter.split_documents(
+            documents
+        )
+    )
+
+    if not chunks:
+        raise ValueError(
+            "El chunker no generó ningún fragmento."
+        )
+
+    _log(
+        verbose,
+        f"      {len(chunks)} chunk(s) generados."
+    )
+
+    token_counts = [
+        chunk.num_tokens
+        for chunk in chunks
+    ]
+
+    _log(
+        verbose,
+        (
+            "      Tokens/chunk: "
+            f"min={min(token_counts)}, "
+            f"promedio="
+            f"{sum(token_counts) / len(token_counts):.1f}, "
+            f"max={max(token_counts)}"
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Embeddings
+    # ------------------------------------------------------------------
+
+    device = _detect_device()
+
+    _log(
+        verbose,
+        (
+            f"[3/4] Embeddings con "
+            f"'{embedding_model}' "
+            f"en dispositivo '{device}'..."
+        ),
+    )
+
+    encoder = Encoder(
+        model_name=embedding_model,
+        batch_size=batch_size,
+        device=device,
+        show_progress=verbose,
+    )
+
+    vectors = encoder.encode_chunks(
+        chunks
+    )
+
+    if len(vectors) != len(chunks):
+        raise RuntimeError(
+            "La cantidad de embeddings no coincide "
+            "con la cantidad de chunks."
+        )
+
+    _log(
+        verbose,
+        f"      Vectores shape: {vectors.shape}"
+    )
+
+    # ------------------------------------------------------------------
+    # 4. FAISS + Metadata
+    # ------------------------------------------------------------------
+
+    _log(
+        verbose,
+        "[4/4] Indexando en FAISS..."
+    )
+
+    faiss_manager = FAISSManager(
+        dimensions=encoder.dimensions,
+        index_type=index_type,
+    )
 
     if index_type == "ivf_flat":
-        faiss_mgr.train(vectors)
 
-    faiss_mgr.add(vectors)
+        faiss_manager.train(
+            vectors
+        )
 
-    meta_store = MetadataStore(store_documents=True)
-    meta_store.add(chunks)
+    faiss_manager.add(
+        vectors
+    )
 
-    # ── Persistencia ────────────────────────────────────────────────────
-    base = Path(save_path) if save_path else Path(VECTORSTORE_PATH)
-    base.mkdir(parents=True, exist_ok=True)
+    metadata_store = MetadataStore(
+        store_documents=True
+    )
 
-    index_file = faiss_mgr.save(base / "index.faiss")
-    meta_file = meta_store.save(base / "metadata.jsonl")
+    metadata_store.add(
+        chunks
+    )
 
-    elapsed = time.perf_counter() - t_start
-    _log(verbose, f"\n✓ Índice construido en {elapsed:.1f}s")
-    _log(verbose, f"  FAISS  → {index_file}")
-    _log(verbose, f"  Meta   → {meta_file}")
-    _log(verbose, f"  Total vectores: {faiss_mgr.size}")
+    # Debe cumplirse:
+    # 1 vector FAISS <-> 1 línea metadata.
+    if faiss_manager.size != metadata_store.size:
+        raise RuntimeError(
+            "FAISS y MetadataStore quedaron desalineados: "
+            f"{faiss_manager.size} vectores vs "
+            f"{metadata_store.size} registros."
+        )
 
-    return faiss_mgr, meta_store
+    metadata_store.validate_required_fields()
+    metadata_store.validate_faiss_alignment()
+
+    # ------------------------------------------------------------------
+    # Persistencia
+    # ------------------------------------------------------------------
+
+    base = (
+        Path(save_path)
+        if save_path
+        else Path(VECTORSTORE_PATH)
+    )
+
+    base.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    index_file = faiss_manager.save(
+        base / "index.faiss"
+    )
+
+    metadata_file = metadata_store.save(
+        base / "metadata.jsonl"
+    )
+
+    elapsed = (
+        time.perf_counter()
+        - start_time
+    )
+
+    _log(
+        verbose,
+        f"\n✓ Índice construido en {elapsed:.1f}s"
+    )
+
+    _log(
+        verbose,
+        f"  FAISS → {index_file}"
+    )
+
+    _log(
+        verbose,
+        f"  Meta  → {metadata_file}"
+    )
+
+    _log(
+        verbose,
+        f"  Total vectores: {faiss_manager.size}"
+    )
+
+    return (
+        faiss_manager,
+        metadata_store,
+    )
 
 
-def _log(verbose: bool, msg: str) -> None:
+def _log(
+    verbose: bool,
+    message: str,
+) -> None:
+
     if verbose:
-        print(msg)
+        print(message)
+
 
 if __name__ == "__main__":
 
     sources = [
-        p
-        for p in Path("data/raw").rglob("*")
-        if p.is_file()
+        path
+        for path in Path("data/raw").rglob("*")
+        if path.is_file()
     ]
 
-    print(f"Fuentes encontradas: {len(sources)}")
-
-    for s in sources[:10]:
-        print(s)
+    print(
+        f"Fuentes encontradas: {len(sources)}"
+    )
 
     build_index(
         sources=sources

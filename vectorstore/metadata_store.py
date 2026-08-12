@@ -1,179 +1,456 @@
 """
 Almacén de metadatos asociados a los vectores del índice FAISS.
 
-FAISS solo almacena vectores numéricos con índices enteros.
-MetadataStore mantiene el mapeo índice_faiss → Document / metadatos.
+FAISS almacena únicamente vectores y posiciones enteras.
+MetadataStore mantiene la correspondencia exacta entre:
+
+    FAISS internal ID <-> metadata.jsonl <-> Chunk
+
+El orden de los registros es crítico:
+la línea N de metadata.jsonl corresponde al vector N del índice FAISS.
 """
+
 from __future__ import annotations
 
 import json
 import pickle
 from pathlib import Path
-from core.chunk import Chunk
+from typing import Any
 
 from config.settings import VECTORSTORE_PATH
+from core.chunk import Chunk
 from core.document import Document
 
 
 class MetadataStore:
-    """
-    Almacén clave-valor que asocia cada posición del índice FAISS
-    con el Document y sus metadatos originales.
+  
 
-    Internamente usa una lista ordenada: la posición i corresponde
-    al vector i en FAISSManager.
-
-    Args:
-        store_documents: Si True, guarda el contenido completo del Document.
-                         Si False, solo guarda los metadatos (ahorra memoria).
-    """
-
-    def __init__(self, store_documents: bool = True) -> None:
+    def __init__(
+        self,
+        store_documents: bool = True,
+    ) -> None:
         self.store_documents = store_documents
-        self._records: list[dict] = []
+        self._records: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Gestión de registros
     # ------------------------------------------------------------------
 
-    def add(self, chunks: list[Chunk]) -> None:
-        """
-        Agrega chunks al store en el mismo orden en que sus vectores
-    fueron agregados a FAISSManager.
+    def add(
+        self,
+        chunks: list[Chunk],
+    ) -> None:
+       
 
-    Args:
-        chunks: Lista de Chunk cuyas posiciones coinciden con
-                los vectores recién agregados al índice.
-        """
         for chunk in chunks:
-            self._records.append(
-                chunk.to_metadata_record()
+
+            faiss_id = len(self._records)
+
+            record = chunk.to_metadata_record()
+
+            # Guardamos explícitamente el ID interno para facilitar
+            # auditoría y trazabilidad.
+            record["faiss_id"] = faiss_id
+
+            self._records.append(record)
+
+    def get(
+        self,
+        index: int,
+    ) -> dict[str, Any]:
+       
+
+        if index < 0 or index >= len(self._records):
+            raise IndexError(
+                f"Índice {index} fuera de rango "
+                f"(total: {len(self._records)})"
             )
 
-    def get(self, index: int) -> dict:
-        """
-        Devuelve el registro asociado a la posición `index` del índice FAISS.
-
-        Args:
-            index: Posición entera en el índice FAISS.
-
-        Returns:
-            Diccionario con 'content' (opcional), 'metadata' y 'doc_id'.
-
-        Raises:
-            IndexError: Si el índice está fuera de rango.
-        """
-        if index < 0 or index >= len(self._records):
-            raise IndexError(f"Índice {index} fuera de rango (total: {len(self._records)})")
         return self._records[index]
 
-    def get_documents(self, indices: list[int]) -> list[Document]:
-        """
-        Recupera Documents a partir de una lista de índices FAISS.
+    # ------------------------------------------------------------------
+    # Recuperación como Chunk
+    # ------------------------------------------------------------------
 
-        Args:
-            indices: Lista de posiciones enteras (e.g., retornadas por FAISSManager.search).
+    def get_chunk(
+        self,
+        index: int,
+    ) -> Chunk:
+       
 
-        Returns:
-            Lista de Documents. Los índices inválidos (-1) se omiten.
-        """
-        documents: list[Document] = []
-        for idx in indices:
-            if idx == -1:  # FAISS usa -1 para resultados vacíos
+        record = self.get(index)
+
+        return Chunk.from_metadata_record(record)
+
+    def get_chunks(
+        self,
+        indices: list[int],
+    ) -> list[Chunk]:
+        
+
+        chunks: list[Chunk] = []
+
+        for index in indices:
+
+            if index == -1:
                 continue
-            record = self.get(idx)
+
+            chunks.append(
+                self.get_chunk(index)
+            )
+
+        return chunks
+
+    # ------------------------------------------------------------------
+    # Recuperación compatible como Document
+    # ------------------------------------------------------------------
+
+    def get_documents(
+        self,
+        indices: list[int],
+    ) -> list[Document]:
+       
+
+        documents: list[Document] = []
+
+        chunks = self.get_chunks(indices)
+
+        for chunk in chunks:
+
+            metadata: dict[str, Any] = {
+                # Campos obligatorios del chunk
+                "chunk_id": chunk.chunk_id,
+                "doc_id": chunk.doc_id,
+                "fuente": chunk.fuente,
+                "formato": chunk.formato,
+                "fenomeno": chunk.fenomeno,
+                "posicion": chunk.posicion,
+                "num_tokens": chunk.num_tokens,
+                "texto": chunk.texto,
+
+                # ID interno de FAISS
+                "faiss_id": chunk.faiss_id,
+            }
+
+            # Metadata adicional:
+            # idioma, página, título, sección, URL, etc.
+            metadata.update(chunk.metadata)
+
+            
+
+            metadata.setdefault(
+                "source",
+                chunk.fuente,
+            )
+
+            metadata.setdefault(
+                "file_type",
+                chunk.formato,
+            )
+
+            if "idioma" in metadata:
+                metadata.setdefault(
+                    "language",
+                    metadata["idioma"],
+                )
+
             documents.append(
                 Document(
-                    doc_id=record["doc_id"],
-                    fuente=record["fuente"],
-                    formato=record["formato"],
-                    fenomeno=record["fenomeno"],
-                    content=record["texto"],
-                    metadata={},
+                    doc_id=chunk.doc_id,
+                    fuente=chunk.fuente,
+                    formato=chunk.formato,
+                    fenomeno=chunk.fenomeno,
+                    content=chunk.texto,
+                    metadata=metadata,
                 )
             )
+
         return documents
+
+    # ------------------------------------------------------------------
+    # Información del store
+    # ------------------------------------------------------------------
 
     @property
     def size(self) -> int:
-        """Número de registros almacenados."""
+        """Número total de registros almacenados."""
+
         return len(self._records)
+
+    def __len__(self) -> int:
+        """Permite utilizar len(metadata_store)."""
+
+        return self.size
+
+    # ------------------------------------------------------------------
+    # Validación
+    # ------------------------------------------------------------------
+
+    def validate_required_fields(self) -> None:
+        """
+        Verifica que todos los registros tengan los campos obligatorios.
+
+        Raises:
+            ValueError:
+                Si algún registro está incompleto.
+        """
+
+        required_fields = {
+            "chunk_id",
+            "doc_id",
+            "fuente",
+            "formato",
+            "fenomeno",
+            "posicion",
+            "num_tokens",
+            "texto",
+        }
+
+        for index, record in enumerate(self._records):
+
+            missing = required_fields - record.keys()
+
+            if missing:
+                raise ValueError(
+                    f"Registro FAISS {index} incompleto. "
+                    f"Faltan campos: {sorted(missing)}"
+                )
+
+    def validate_faiss_alignment(self) -> None:
+        """
+        Verifica que faiss_id coincida con el número de línea/posición.
+
+        Esto garantiza:
+
+            FAISS ID N == metadata.jsonl línea N
+        """
+
+        for expected_id, record in enumerate(self._records):
+
+            faiss_id = record.get(
+                "faiss_id",
+                expected_id,
+            )
+
+            if int(faiss_id) != expected_id:
+                raise ValueError(
+                    "Desalineación FAISS/metadata detectada: "
+                    f"posición={expected_id}, "
+                    f"faiss_id={faiss_id}"
+                )
 
     # ------------------------------------------------------------------
     # Persistencia
     # ------------------------------------------------------------------
 
-    def save(self, path: Path | str | None = None, format: str = "json") -> Path:
+    def save(
+        self,
+        path: Path | str | None = None,
+        format: str = "json",
+    ) -> Path:
         """
-        Guarda el store en disco.
+        Guarda el MetadataStore.
+
+        Para CODEFEST el formato principal es JSONL:
+        exactamente un objeto JSON por línea.
 
         Args:
-            path:   Ruta del archivo. Por defecto usa VECTORSTORE_PATH/metadata.json.
-            format: 'json' o 'pickle'. JSON es legible; pickle soporta cualquier tipo.
+            path:
+                Ruta de destino.
+            format:
+                ``json`` o ``pickle``.
 
         Returns:
-            Ruta donde se guardó el store.
+            Ruta del archivo generado.
         """
-        if format not in ("json", "pickle"):
-            raise ValueError("format debe ser 'json' o 'pickle'")
 
-        ext = "jsonl" if format == "json" else "pkl"
-        save_path = Path(path) if path else Path(VECTORSTORE_PATH) / f"metadata.{ext}"
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        if format not in (
+            "json",
+            "pickle",
+        ):
+            raise ValueError(
+                "format debe ser 'json' o 'pickle'"
+            )
+
+        # Validamos antes de persistir.
+        self.validate_required_fields()
+        self.validate_faiss_alignment()
+
+        extension = (
+            "jsonl"
+            if format == "json"
+            else "pkl"
+        )
+
+        save_path = (
+            Path(path)
+            if path
+            else Path(VECTORSTORE_PATH)
+            / f"metadata.{extension}"
+        )
+
+        save_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
         if format == "json":
-            with save_path.open("w", encoding="utf-8") as f:
+
+            with save_path.open(
+                "w",
+                encoding="utf-8",
+            ) as file:
+
                 for record in self._records:
-                    f.write(
-                        json.dumps(record, ensure_ascii=False)
+
+                    file.write(
+                        json.dumps(
+                            record,
+                            ensure_ascii=False,
+                        )
                     )
-                    f.write("\n")
+
+                    file.write("\n")
+
         else:
-            with save_path.open("wb") as f:
-                pickle.dump(self._records, f)
+
+            with save_path.open(
+                "wb"
+            ) as file:
+
+                pickle.dump(
+                    self._records,
+                    file,
+                )
 
         return save_path
+
+    # ------------------------------------------------------------------
+    # Carga desde disco
+    # ------------------------------------------------------------------
 
     @classmethod
     def load(
         cls,
         path: Path | str,
-        store_documents: bool = True
+        store_documents: bool = True,
     ) -> "MetadataStore":
         """
-        Carga el store desde disco.
+        Carga metadata desde JSON, JSONL o pickle.
 
         Args:
-            path:            Ruta al archivo (.json o .pkl).
-            store_documents: Parámetro de la instancia creada.
+            path:
+                Ruta al archivo.
+            store_documents:
+                Mantiene compatibilidad con la interfaz existente.
 
         Returns:
-            Instancia de MetadataStore con los registros cargados.
+            MetadataStore reconstruido.
         """
-        path = Path(path)
-        instance = cls(store_documents=store_documents)
 
-        if path.suffix == ".json":
-            instance._records = json.loads(
-                path.read_text(encoding="utf-8")
+        path = Path(path)
+
+        if not path.exists():
+            raise FileNotFoundError(
+                f"No existe el archivo de metadata: {path}"
             )
 
-        elif path.suffix == ".jsonl":
-            with path.open("r", encoding="utf-8") as f:
-                instance._records = [
-                    json.loads(line)
-                    for line in f
-                    if line.strip()
-                ]
+        instance = cls(
+            store_documents=store_documents
+        )
 
-        elif path.suffix in (".pkl", ".pickle"):
-            with path.open("rb") as f:
-                instance._records = pickle.load(f)
+        # --------------------------------------------------------------
+        # JSON tradicional
+        # --------------------------------------------------------------
+
+        if path.suffix.lower() == ".json":
+
+            data = json.loads(
+                path.read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            if not isinstance(data, list):
+                raise ValueError(
+                    "El archivo JSON debe contener una lista "
+                    "de registros."
+                )
+
+            instance._records = data
+
+        # --------------------------------------------------------------
+        # JSON Lines
+        # --------------------------------------------------------------
+
+        elif path.suffix.lower() == ".jsonl":
+
+            records: list[dict[str, Any]] = []
+
+            with path.open(
+                "r",
+                encoding="utf-8",
+            ) as file:
+
+                for line_number, line in enumerate(
+                    file,
+                    start=1,
+                ):
+
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    try:
+                        record = json.loads(line)
+
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            "JSON inválido en metadata.jsonl "
+                            f"línea {line_number}"
+                        ) from exc
+
+                    if not isinstance(record, dict):
+                        raise ValueError(
+                            "Cada línea de metadata.jsonl "
+                            "debe ser un objeto JSON. "
+                            f"Error en línea {line_number}."
+                        )
+
+                    records.append(record)
+
+            instance._records = records
+
+        # --------------------------------------------------------------
+        # Pickle
+        # --------------------------------------------------------------
+
+        elif path.suffix.lower() in (
+            ".pkl",
+            ".pickle",
+        ):
+
+            with path.open(
+                "rb"
+            ) as file:
+
+                instance._records = pickle.load(
+                    file
+                )
 
         else:
+
             raise ValueError(
-                f"Formato de archivo no soportado: {path.suffix}"
+                "Formato de metadata no soportado: "
+                f"{path.suffix}"
             )
 
+        # --------------------------------------------------------------
+        # Validaciones después de cargar
+        # --------------------------------------------------------------
+
+        instance.validate_required_fields()
+        instance.validate_faiss_alignment()
+
         return instance
-    
