@@ -119,16 +119,35 @@ class SentenceSplitter:
         correspondiente al encoder configurado.
         """
 
+        if not isinstance(text, str):
+            print(
+                f"[ERROR TOKENIZER] "
+                f"type={type(text)} "
+                f"value={repr(text)[:300]}"
+            )
+            raise TypeError(
+                f"count_tokens recibió {type(text)}"
+            )
+
         if not text:
             return 0
 
-        token_ids = self.tokenizer.encode(
-            text,
-            add_special_tokens=False,
-            truncation=False,
-        )
+        try:
+            return len(
+                self.tokenizer(
+                    str(text),
+                    add_special_tokens=False,
+                    truncation=False,
+                )["input_ids"]
+            )
 
-        return len(token_ids)
+        except Exception as e:
+            print("\n=== TOKENIZER ERROR ===")
+            print("TYPE:", type(text))
+            print("VALUE:", repr(text[:500]))
+            print("ERROR:", e)
+            print("=======================\n")
+            raise
 
     # ------------------------------------------------------------------
     # Segmentación de oraciones
@@ -280,9 +299,14 @@ class SentenceSplitter:
         start_char = spans[start_index][0]
         end_char = spans[end_index - 1][1]
 
-        return text[
+        result = text[
             start_char:end_char
-        ].strip()
+        ]
+
+        if result is None:
+            return ""
+
+        return str(result).strip()
 
     # ------------------------------------------------------------------
     # Overlap
@@ -375,6 +399,11 @@ class SentenceSplitter:
                     end + 1,
                 )
 
+                if not isinstance(candidate, str):
+                    print(
+                        f"[CANDIDATE TYPE ERROR] "
+                        f"{type(candidate)}"
+                    )
                 token_count = self.count_tokens(
                     candidate
                 )
@@ -540,6 +569,11 @@ class SentenceSplitter:
         El procesamiento completo de datos tabulares se realiza
         principalmente mediante split_documents().
         """
+        if document.content is None:
+            return []
+            
+        if not isinstance(document.content, str):
+            document.content = str(document.content)
 
         if not document.content.strip():
             return []
@@ -629,9 +663,15 @@ class SentenceSplitter:
 
         for document in documents:
 
-            if not document.content.strip():
+            if document.content is None:
                 continue
 
+            if not isinstance(document.content, str):
+                document.content = str(document.content)
+
+            if not document.content.strip():
+                continue
+            
             if (
                 document.formato.lower()
                 in self.TABULAR_FORMATS
