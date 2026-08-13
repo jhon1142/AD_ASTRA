@@ -167,8 +167,35 @@ class Encoder:
         Returns:
             Array numpy de shape (len(chunks), dimensions).
         """
-        texts = [c.texto for c in chunks]
-        return self.encode(texts, is_query=False)
+        texts = []
+
+        for i, c in enumerate(chunks):
+
+            print(
+                f"Chunk {i}: "
+                f"{type(c)}"
+            )
+
+            print(
+                f"texto type: "
+                f"{type(c.texto)}"
+            )
+
+            if not isinstance(c.texto, str):
+
+                print("VALOR:")
+                print(c.texto)
+
+                raise TypeError(
+                    f"Chunk {i} tiene texto inválido"
+                )
+
+            texts.append(c.texto)
+
+        return self.encode(
+            texts,
+            is_query=False,
+        )
 
     # ------------------------------------------------------------------
     # Propiedades

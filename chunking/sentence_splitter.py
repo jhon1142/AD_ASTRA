@@ -101,7 +101,7 @@ class SentenceSplitter:
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
-            use_fast=True,
+            use_fast=False,
         )
 
         self._nlp = self._create_sentence_segmenter()
@@ -671,7 +671,7 @@ class SentenceSplitter:
 
             if not document.content.strip():
                 continue
-            
+
             if (
                 document.formato.lower()
                 in self.TABULAR_FORMATS
